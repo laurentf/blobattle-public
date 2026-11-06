@@ -1,0 +1,175 @@
+local i18n = require("ui.i18n")
+local keymap = require("input.keymap")
+local keys_view = require("ui.keys_view")
+local palette = require("ui.palette")
+local pointer = require("ui.pointer")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local BUTTONS = { "back", "default" }
+local FIT = { "title", "back", "default", "row" }
+local STEP = { landscape = 58, portrait = 52 }
+local KEY_SIZE = { landscape = vmath.vector3(86, 56, 0), portrait = vmath.vector3(86, 48, 0) }
+local COLUMN = 187
+local WAITING = palette.TEAMS[3]
+local ROW, CAPTION, KEY, KEY_LABEL =
+  hash("row"), hash("row_caption"), hash("row_key"), hash("row_key_label")
+local ESCAPE = hash(keymap.ESCAPE)
+local KEY_NAMES = keymap.actions(hash)
+local LISTEN = "window.blobattleKeys || (window.blobattleKeys = { last: '' }, "
+  .. "window.addEventListener('keydown', "
+  .. "function (e) { window.blobattleKeys.last = e.key || ''; }, true), 1)"
+local LAST = "window.blobattleKeys ? window.blobattleKeys.last : ''"
+
+local function clear(self)
+  for _, nodes in ipairs(self.rows) do
+    gui.delete_node(nodes[ROW])
+  end
+  self.rows = {}
+end
+
+local function paint(nodes, row)
+  local caption = nodes[CAPTION]
+  gui.set_text(caption, row.caption)
+  gui.set_color(caption, widgets.colour(palette.PAPER))
+  gui.set_outline(caption, widgets.colour(palette.INK))
+  gui.set_color(nodes[KEY], widgets.colour(row.waiting and WAITING or palette.BUTTON))
+  local label = nodes[KEY_LABEL]
+  gui.set_text(label, row.key)
+  gui.set_color(label, widgets.colour(palette.INK))
+  gui.set_outline(label, widgets.colour(palette.PAPER))
+end
+
+local function publish(self, rows)
+  if not testmode.enabled() then
+    return
+  end
+  local targets, shown = { back = gui.get_node("back"), default = gui.get_node("default") }, {}
+  for i, row in ipairs(rows) do
+    targets[row.command] = self.rows[i][KEY]
+    shown[row.command] = gui.get_text(self.rows[i][KEY_LABEL])
+  end
+  testmode.targets("keys", targets)
+  testmode.put("keys", { waiting = self.waiting, shown = shown })
+end
+
+local function refresh(self)
+  clear(self)
+  widgets.text("title", i18n.t("keys.title"))
+  widgets.button("back", { text = i18n.t("keys.back") })
+  widgets.button("default", { text = i18n.t("keys.default") })
+  local factor = widgets.fit(self, FIT)
+  local ref = widgets.reference()
+  local portrait = ref[1] < ref[2]
+  local step = (portrait and STEP.portrait or STEP.landscape) * factor
+  local key_size = portrait and KEY_SIZE.portrait or KEY_SIZE.landscape
+  local template = gui.get_node("row")
+  local origin = gui.get_position(template)
+  gui.set_enabled(template, false)
+  local rows = keys_view.rows(session.keys, { portrait = portrait, waiting = self.waiting })
+  for i, row in ipairs(rows) do
+    local nodes = gui.clone_tree(template)
+    local offset = vmath.vector3((row.column - 1) * COLUMN * factor, -(row.line - 1) * step, 0)
+    gui.set_enabled(nodes[ROW], true)
+    gui.set_position(nodes[ROW], origin + offset)
+    gui.set_size(nodes[KEY], key_size)
+    paint(nodes, row)
+    self.rows[i] = nodes
+  end
+  publish(self, rows)
+end
+
+local function row_at(self, p)
+  for i, nodes in ipairs(self.rows) do
+    if gui.pick_node(nodes[KEY], p.x, p.y) then
+      return keymap.COMMANDS[i]
+    end
+  end
+  return nil
+end
+
+local function released(action_id, action)
+  for _, p in ipairs(pointer.from(action_id, action) or {}) do
+    if p.released then
+      return p
+    end
+  end
+  return nil
+end
+
+local function choose(self, key)
+  local typed = html5 and html5.run(LAST) or nil
+  if keymap.assign(session.keys, self.waiting, key, typed) then
+    keymap.save(session.keys)
+  end
+  self.waiting = nil
+  refresh(self)
+end
+
+local function home(self)
+  self.waiting, self.shown = nil, false
+  msg.post("main:/app#app", "show", { screen = "home" })
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  if html5 then
+    html5.run(LISTEN)
+  end
+  self.rows = {}
+  self.waiting, self.shown = nil, false
+end
+
+function update(self)
+  if self.shown and widgets.resized(self) then
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    if self.shown then
+      refresh(self)
+    end
+  elseif message_id == hash("refresh") then
+    self.waiting, self.shown = nil, true
+    refresh(self)
+  end
+end
+
+function on_input(self, action_id, action)
+  if not self.shown then
+    return false
+  end
+  local key = KEY_NAMES[action_id]
+  if key and action.pressed and self.waiting then
+    choose(self, key)
+    return true
+  end
+  if action_id == ESCAPE and action.pressed then
+    if self.waiting then
+      self.waiting = nil
+      refresh(self)
+    else
+      home(self)
+    end
+    return true
+  end
+  local p = released(action_id, action)
+  if p == nil then
+    return false
+  end
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  self.waiting = row_at(self, p)
+  if pressed == "default" then
+    keymap.reset(session.keys)
+    keymap.save(session.keys)
+  elseif pressed == "back" then
+    home(self)
+    return true
+  end
+  refresh(self)
+  return true
+end

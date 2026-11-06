@@ -1,0 +1,28 @@
+name: "main"
+scale_along_z: 0
+embedded_instances {
+  id: "terrain"
+  data: "components {\n"
+  "  id: \"terrain\"\n"
+  "  component: \"/main/terrain.script\"\n"
+  "}\n"
+  "embedded_components {\n"
+  "  id: \"mesh\"\n"
+  "  type: \"mesh\"\n"
+  "  data: \"material: \\\"/main/terrain.material\\\"\\n"
+  "vertices: \\\"/main/quad.buffer\\\"\\n"
+  "primitive_type: PRIMITIVE_TRIANGLE_STRIP\\n"
+  "position_stream: \\\"position\\\"\\n"
+  "normal_stream: \\\"position\\\"\\n"
+  "\"\n"
+  "}\n"
+  ""
+}
+embedded_instances {
+  id: "net"
+  data: "components {\n"
+  "  id: \"net\"\n"
+  "  component: \"/main/net.script\"\n"
+  "}\n"
+  ""
+}

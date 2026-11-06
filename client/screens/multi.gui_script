@@ -1,0 +1,134 @@
+local i18n = require("ui.i18n")
+local palette = require("ui.palette")
+local protocol = require("shared.protocol")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local text_fields = require("ui.text_fields")
+local widgets = require("ui.widgets")
+
+local BUTTONS = { "create", "code", "join", "back" }
+local FIT = { "title", "create", "code_caption", "code", "join", "problem", "back" }
+
+local function status()
+  local l = session.link
+  return l and l.status
+end
+
+local function problem_text()
+  if status() == "connecting" then
+    return i18n.t("multi.connecting")
+  end
+  local reason = session.multi_problem
+  if reason == nil then
+    return nil
+  end
+  local id = "reason." .. reason
+  return i18n.has(id) and i18n.t(id) or i18n.t("reason.refused")
+end
+
+local function place_field(self)
+  if not text_fields.available() or not self.visible then
+    return
+  end
+  local _, scale = widgets.reference()
+  text_fields.place("code", gui.get_node("code"), {
+    value = session.room_code or "",
+    max = protocol.CODE_LENGTH,
+    colour = palette.INK,
+    scale = scale,
+  })
+end
+
+local function refresh(self)
+  local busy = status() == "connecting"
+  local fields = text_fields.available()
+  widgets.text("title", i18n.t("multi.title"))
+  widgets.button("create", { text = i18n.t("multi.create"), enabled = not busy })
+  widgets.text("code_caption", i18n.t("multi.code"))
+  widgets.button("code", { text = fields and "" or (session.room_code or "") })
+  gui.set_color(gui.get_node("code"), widgets.colour(palette.PAPER))
+  widgets.button("join", {
+    text = i18n.t("multi.join"),
+    enabled = not busy and protocol.valid_code(session.room_code),
+  })
+  widgets.button("back", { text = i18n.t("multi.back") })
+  local text = problem_text()
+  gui.set_enabled(widgets.text("problem", text or "", palette.TEAMS[1]), text ~= nil)
+  self.status = status()
+  widgets.fit(self, FIT)
+  local targets = {}
+  for _, name in ipairs(BUTTONS) do
+    targets[name] = gui.get_node(name)
+  end
+  testmode.targets("multi", targets)
+  testmode.put("multi", {
+    code = session.room_code,
+    status = self.status,
+    reason = session.multi_problem,
+    shown = text,
+  })
+  place_field(self)
+end
+
+local function typed()
+  local id, value = text_fields.poll()
+  local any = false
+  while id do
+    if id == "code" then
+      session.room_code = value:upper()
+      any = true
+    end
+    id, value = text_fields.poll()
+  end
+  return any
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  self.visible = false
+end
+
+function update(self)
+  if not self.visible then
+    return
+  end
+  if typed() or widgets.resized(self) or status() ~= self.status then
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  elseif message_id == hash("refresh") then
+    self.visible = true
+    refresh(self)
+  elseif message_id == hash("hidden") then
+    self.visible = false
+  end
+end
+
+function on_input(self, action_id, action)
+  if not self.visible then
+    return false
+  end
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  if pressed == nil then
+    return false
+  end
+  text_fields.blur()
+  typed()
+  if status() == "connecting" and pressed ~= "back" then
+    return true
+  end
+  if pressed == "create" then
+    msg.post("main:/app#app", "multi_create")
+  elseif pressed == "join" and protocol.valid_code(session.room_code) then
+    msg.post("main:/app#app", "multi_join", { code = session.room_code })
+  elseif pressed == "back" then
+    msg.post("main:/app#app", "show", { screen = "home" })
+  end
+  refresh(self)
+  return true
+end

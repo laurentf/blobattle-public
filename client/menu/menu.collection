@@ -1,0 +1,13 @@
+name: "menu"
+instances {
+  id: "camera"
+  prototype: "/game/camera.go"
+  position {
+    z: 120.0
+  }
+}
+instances {
+  id: "backdrop"
+  prototype: "/menu/backdrop.go"
+}
+scale_along_z: 0

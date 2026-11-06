@@ -1,0 +1,509 @@
+local hud_model = require("game.hud_model")
+local i18n = require("ui.i18n")
+local palette = require("ui.palette")
+local rules = require("shared.sim.rules")
+local shorten = require("ui.shorten")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local REFERENCE_WIDTH, REFERENCE_HEIGHT = 844, 390
+local BUTTONS = {
+  "left",
+  "right",
+  "jump",
+  "climb_up",
+  "climb_down",
+  "weapon",
+  "fuse",
+  "grid_1",
+  "grid_2",
+  "grid_3",
+  "grid_4",
+  "grid_5",
+  "grid_6",
+  "grid_7",
+  "grid_8",
+  "grid_9",
+  "grid_10",
+  "action",
+}
+local PADS = { "left", "right", "jump", "climb_up", "climb_down" }
+local ARROWS = { "left", "right", "climb_up", "climb_down" }
+local GRID = 10
+local POP_RISE, POP_SECONDS = 40, 1.5
+local AIM_MIN, AIM_PER_POWER = 36, 1.4
+local PAD_ALPHA = 0.4
+local HP_STEP = 16
+local GAUGE_WIDTH, GAUGE_HEIGHT = 32, 4
+local MARKER_ABOVE = 40
+local FIT = {
+  "left",
+  "right",
+  "jump",
+  "weapon",
+  "fuse",
+  "grid_1",
+  "grid_2",
+  "grid_3",
+  "grid_4",
+  "grid_5",
+  "grid_6",
+  "grid_7",
+  "grid_8",
+  "grid_9",
+  "grid_10",
+  "action",
+  "target_mark",
+  "pop",
+  "climb_up",
+  "climb_down",
+  "aim",
+  "team_swatch",
+  "team_name",
+  "hp_row",
+  "timer",
+  "wind",
+  "wind_arrow",
+  "label",
+  "marker",
+}
+local LABEL, LABEL_NAME, LABEL_HP = hash("label"), hash("label_name"), hash("label_hp")
+local LABEL_GAUGE, LABEL_GAUGE_FILL = hash("label_gauge"), hash("label_gauge_fill")
+local HP_ROW, HP_LETTER, HP_VALUE = hash("hp_row"), hash("hp_letter"), hash("hp_value")
+local HP_NAME, HP_BOT, HP_BOT_FACE = hash("hp_name"), hash("hp_bot"), hash("hp_bot_face")
+local HP_BOT_PARTS = { hash("hp_bot_eye_left"), hash("hp_bot_eye_right"), hash("hp_bot_antenna") }
+local NAME_WIDTH = 104
+
+local function colour(rgb, alpha)
+  return vmath.vector4(rgb[1], rgb[2], rgb[3], alpha or 1)
+end
+
+local function weapon_text(id)
+  local name = i18n.t("weapon." .. id)
+  local count = hud_model.ammo[id]
+  if count == nil or count < 0 then
+    return name
+  end
+  return i18n.format("hud.ammo", { name = name, count = count })
+end
+
+local function mix(out, a, b, t)
+  out.x = a[1] + (b[1] - a[1]) * t
+  out.y = a[2] + (b[2] - a[2]) * t
+  out.z = a[3] + (b[3] - a[3]) * t
+  out.w = 1
+  return out
+end
+
+function init(self)
+  self.nodes, self.rects = {}, {}
+  for _, name in ipairs(BUTTONS) do
+    self.nodes[name] = gui.get_node(name)
+    self.rects[name] = {}
+  end
+  self.labels = {
+    weapon = gui.get_node("weapon_label"),
+    fuse = gui.get_node("fuse_label"),
+    action = gui.get_node("action_label"),
+  }
+  for i = 1, GRID do
+    self.labels["grid_" .. i] = gui.get_node("grid_" .. i .. "_label")
+  end
+  self.mark, self.mark_pos = gui.get_node("target_mark"), vmath.vector3()
+  gui.set_color(self.mark, colour(palette.TARGET))
+  gui.set_color(gui.get_node("target_mark_bar"), colour(palette.TARGET))
+  self.pop_template, self.pops = gui.get_node("pop"), {}
+  gui.set_color(self.pop_template, colour(palette.PAPER))
+  gui.set_outline(self.pop_template, colour(palette.INK))
+  self.aim = gui.get_node("aim")
+  self.aim_vectors = {
+    pos = vmath.vector3(),
+    rot = vmath.vector3(),
+    size = vmath.vector3(0, 8, 0),
+    colour = vmath.vector4(),
+  }
+  self.marker_pos = vmath.vector3()
+  self.info = {
+    swatch = gui.get_node("team_swatch"),
+    letter = gui.get_node("team_letter"),
+    name = gui.get_node("team_name"),
+    timer = gui.get_node("timer"),
+    wind = gui.get_node("wind"),
+    arrow = gui.get_node("wind_arrow"),
+    marker = gui.get_node("marker"),
+  }
+  self.hp_rows, self.tags, self.cache = {}, {}, {}
+  self.hp_template, self.label_template = gui.get_node("hp_row"), gui.get_node("label")
+  hud_model.shown = { weapon_labels = {} }
+  for _, name in ipairs({ "team_name", "timer", "wind" }) do
+    gui.set_color(gui.get_node(name), colour(palette.PAPER))
+    gui.set_outline(gui.get_node(name), colour(palette.INK))
+  end
+  gui.set_color(self.info.letter, colour(palette.INK))
+  gui.set_color(self.info.arrow, colour(palette.PAPER))
+  gui.set_color(self.info.marker, colour(palette.PAPER))
+  for _, name in ipairs(PADS) do
+    gui.set_color(self.nodes[name], colour(palette.INK, PAD_ALPHA))
+  end
+  self.arrows = {}
+  for _, name in ipairs(ARROWS) do
+    self.arrows[name] = gui.get_node(name .. "_arrow")
+    gui.set_color(self.arrows[name], colour(palette.PAPER))
+  end
+  self.jump_label = gui.get_node("jump_label")
+  gui.set_color(self.jump_label, colour(palette.PAPER))
+  gui.set_outline(self.jump_label, colour(palette.INK))
+  gui.set_text(self.jump_label, i18n.t("hud.jump"))
+  local coloured = { "weapon", "fuse", "action" }
+  for i = 1, GRID do
+    coloured[#coloured + 1] = "grid_" .. i
+  end
+  for _, name in ipairs(coloured) do
+    gui.set_color(self.nodes[name], colour(palette.BUTTON))
+    gui.set_color(self.labels[name], colour(palette.INK))
+    gui.set_outline(self.labels[name], colour(palette.PAPER))
+  end
+end
+
+local function measure_buttons(self)
+  local width, height = window.get_size()
+  local scale = math.min(width / REFERENCE_WIDTH, height / REFERENCE_HEIGHT)
+  hud_model.scale = scale
+  for _, name in ipairs(BUTTONS) do
+    local node = self.nodes[name]
+    local p = gui.get_screen_position(node)
+    local size = gui.get_size(node)
+    local rect = self.rects[name]
+    local own = gui.get_scale(node).x * scale
+    rect.x, rect.y, rect.rx, rect.ry = p.x, p.y, size.x * own / 2, size.y * own / 2
+  end
+end
+
+local function publish_buttons(self)
+  for _, name in ipairs(BUTTONS) do
+    hud_model.buttons[name] = gui.is_enabled(self.nodes[name], true) and self.rects[name] or nil
+  end
+end
+
+local function changed(self, key, a, b)
+  local last = self.cache[key]
+  if last == nil then
+    last = {}
+    self.cache[key] = last
+  elseif last.a == a and last.b == b then
+    return false
+  end
+  last.a, last.b = a, b
+  return true
+end
+
+local function show_weapon(self, name, id)
+  if changed(self, name, id, hud_model.ammo[id]) then
+    local node = self.labels[name]
+    gui.set_text(node, weapon_text(id))
+    local scale = gui.get_scale(node).x
+    local font = gui.get_font_resource(gui.get_font(node))
+    local width = resource.get_text_metrics(font, gui.get_text(node)).width * scale
+    hud_model.shown.weapon_labels[name] =
+      { text = gui.get_text(node), fits = width <= gui.get_size(node).x * scale }
+  end
+end
+
+local function show_controls(self)
+  local mine = hud_model.mine
+  local thumbs = mine and hud_model.touch_device
+  for _, name in ipairs(PADS) do
+    gui.set_enabled(self.nodes[name], thumbs)
+  end
+  local grey = not hud_model.hanging
+  local up_grey = grey and not hud_model.jetting
+  if grey ~= self.climb_grey or up_grey ~= self.up_grey then
+    self.climb_grey, self.up_grey = grey, up_grey
+    gui.set_color(self.arrows.climb_up, colour(up_grey and palette.BUTTON_OFF or palette.PAPER))
+    gui.set_color(self.arrows.climb_down, colour(grey and palette.BUTTON_OFF or palette.PAPER))
+    local shown = hud_model.shown
+    shown.climb_arrow = gui.get_color(self.arrows.climb_up).x
+    shown.live_arrow = gui.get_color(self.arrows.left).x
+  end
+  gui.set_enabled(self.nodes.weapon, mine)
+  local grid = mine and hud_model.grid
+  for i = 1, GRID do
+    local id = hud_model.weapons[i]
+    gui.set_enabled(self.nodes["grid_" .. i], grid and id ~= nil)
+    if id then
+      show_weapon(self, "grid_" .. i, id)
+    end
+  end
+  if hud_model.weapon then
+    show_weapon(self, "weapon", hud_model.weapon)
+  end
+  local fuse = mine and not grid and hud_model.fuse ~= nil
+  gui.set_enabled(self.nodes.fuse, fuse)
+  if fuse and changed(self, "fuse", hud_model.fuse) then
+    gui.set_text(self.labels.fuse, i18n.format("hud.fuse", { seconds = hud_model.fuse }))
+  end
+  local action = hud_model.action
+  gui.set_enabled(self.nodes.action, action ~= nil)
+  if action and changed(self, "action", action) then
+    gui.set_text(self.labels.action, i18n.t("hud." .. action))
+  end
+  hud_model.shown.action = action and gui.get_text(self.labels.action) or nil
+end
+
+local function show_target(self)
+  local target = hud_model.target
+  gui.set_enabled(self.mark, target ~= nil)
+  hud_model.shown.target = target ~= nil
+  if target then
+    self.mark_pos.x, self.mark_pos.y = target.x, target.y
+    gui.set_screen_position(self.mark, self.mark_pos)
+  end
+end
+
+local function show_pops(self)
+  local live = hud_model.pops
+  for i = #self.pops + 1, #live do
+    self.pops[i] = gui.clone(self.pop_template)
+  end
+  local shown = {}
+  for i, node in ipairs(self.pops) do
+    local pop = live[i]
+    gui.set_enabled(node, pop ~= nil)
+    if pop then
+      local scale = hud_model.scale or 1
+      local rise = math.min(1, pop.age / POP_SECONDS)
+      self.mark_pos.x, self.mark_pos.y = pop.x, pop.y + POP_RISE * rise * scale
+      gui.set_screen_position(node, self.mark_pos)
+      gui.set_text(node, pop.text)
+      gui.set_alpha(node, 1 - rise * rise)
+      shown[#shown + 1] = gui.get_text(node)
+    end
+  end
+  hud_model.shown.pops = shown
+end
+
+local function show_aim(self)
+  local aim, origin = hud_model.aim, hud_model.aim_origin
+  gui.set_enabled(self.aim, aim ~= nil and origin ~= nil)
+  hud_model.shown.aim = aim ~= nil and origin ~= nil
+  if aim == nil or origin == nil then
+    return
+  end
+  local v = self.aim_vectors
+  v.pos.x, v.pos.y = origin.x, origin.y
+  v.rot.z = aim.angle * 360 / 1024
+  v.size.x = AIM_MIN + aim.power * AIM_PER_POWER
+  gui.set_screen_position(self.aim, v.pos)
+  gui.set_rotation(self.aim, v.rot)
+  gui.set_size(self.aim, v.size)
+  gui.set_color(self.aim, mix(v.colour, palette.AIM_LOW, palette.AIM_HIGH, aim.power / 100))
+end
+
+local function show_turn(self)
+  local turn = hud_model.turn
+  local info, shown = self.info, hud_model.shown
+  gui.set_enabled(info.swatch, turn ~= nil)
+  gui.set_enabled(info.name, turn ~= nil)
+  if turn == nil then
+    shown.team, shown.letter, self.cache.team = nil, nil, nil
+  elseif changed(self, "team", turn.team, turn.name) then
+    gui.set_color(info.swatch, colour(palette.TEAMS[turn.team]))
+    gui.set_text(info.letter, palette.LETTERS[turn.team])
+    gui.set_text(info.name, turn.name)
+    shown.team = gui.get_text(info.name)
+    shown.letter = gui.get_text(info.letter)
+  end
+  local seconds = hud_model.seconds
+  gui.set_enabled(info.timer, seconds ~= nil)
+  if seconds == nil then
+    shown.timer, self.cache.timer = nil, nil
+  elseif changed(self, "timer", seconds) then
+    gui.set_text(info.timer, i18n.format("hud.seconds", { seconds = seconds }))
+    shown.timer = gui.get_text(info.timer)
+  end
+  local wind = hud_model.wind
+  if not changed(self, "wind", wind) then
+    return
+  end
+  gui.set_text(info.wind, i18n.format("hud.wind", { force = math.abs(wind) }))
+  shown.wind = gui.get_text(info.wind)
+  local direction = wind < 0 and -1 or (wind > 0 and 1 or 0)
+  gui.set_enabled(info.arrow, direction ~= 0)
+  if direction ~= 0 then
+    gui.set_rotation(info.arrow, vmath.vector3(0, 0, -90 * direction))
+  end
+  shown.wind_direction = direction
+end
+
+local function show_teams(self)
+  local origin = self.hp_origin
+  for i, line in ipairs(hud_model.teams) do
+    local row = self.hp_rows[i]
+    if row == nil then
+      row = gui.clone_tree(self.hp_template)
+      local box = row[HP_ROW]
+      gui.set_enabled(box, true)
+      gui.set_position(box, origin - vmath.vector3(0, (i - 1) * HP_STEP * self.fit_factor, 0))
+      gui.set_color(box, colour(palette.TEAMS[line.team]))
+      gui.set_text(row[HP_LETTER], palette.LETTERS[line.team])
+      gui.set_color(row[HP_LETTER], colour(palette.INK))
+      gui.set_color(row[HP_VALUE], colour(palette.PAPER))
+      gui.set_outline(row[HP_VALUE], colour(palette.INK))
+      gui.set_color(row[HP_NAME], colour(palette.PAPER))
+      gui.set_outline(row[HP_NAME], colour(palette.INK))
+      gui.set_color(row[HP_BOT], colour(palette.INK))
+      gui.set_color(row[HP_BOT_FACE], colour(palette.PAPER))
+      for _, part in ipairs(HP_BOT_PARTS) do
+        gui.set_color(row[part], colour(palette.INK))
+      end
+      self.hp_rows[i] = row
+      hud_model.shown.row_fit = self.fit_factor
+    end
+    if row.hp ~= line.hp then
+      row.hp = line.hp
+      gui.set_text(row[HP_VALUE], i18n.format("hud.hp", { hp = line.hp }))
+      line.shown = gui.get_text(row[HP_VALUE])
+    end
+    if row.name ~= line.name then
+      row.name = line.name
+      local node = row[HP_NAME]
+      local scale = gui.get_scale(node).x
+      local font = gui.get_font_resource(gui.get_font(node))
+      gui.set_text(
+        node,
+        shorten.fit({
+          text = line.name or "",
+          max = NAME_WIDTH,
+          mark = i18n.t("hud.cut"),
+          width = function(text)
+            return resource.get_text_metrics(font, text).width * scale
+          end,
+        })
+      )
+      line.name_shown = gui.get_text(node)
+    end
+    if row.bot ~= line.bot then
+      row.bot = line.bot
+      gui.set_enabled(row[HP_BOT], line.bot == true)
+      line.bot_shown = gui.is_enabled(row[HP_BOT], true)
+    end
+  end
+end
+
+local function publish_gauge(nodes, label)
+  local bar = nodes[LABEL_GAUGE]
+  local shown = gui.is_enabled(bar, true)
+  if shown == nodes.bar_shown and nodes.gauge == nodes.gauge_published then
+    return
+  end
+  nodes.bar_shown, nodes.gauge_published = shown, nodes.gauge
+  label.gauge_shown = shown and gui.get_size(nodes[LABEL_GAUGE_FILL]).x / GAUGE_WIDTH or nil
+end
+
+local function show_gauge(nodes, label, active)
+  gui.set_enabled(nodes[LABEL_GAUGE], active)
+  local fuel = active and label.fuel == true
+  if nodes.fuel ~= fuel then
+    nodes.fuel = fuel
+    gui.set_color(nodes[LABEL_GAUGE_FILL], colour(fuel and palette.SPARKS[2] or palette.PAPER))
+    label.fuel_shown = fuel
+  end
+  if not active then
+    nodes.gauge = nil
+  elseif nodes.gauge ~= label.gauge then
+    nodes.gauge = label.gauge
+    nodes.gauge_size.x = GAUGE_WIDTH * label.gauge / rules.GAUGE
+    gui.set_size(nodes[LABEL_GAUGE_FILL], nodes.gauge_size)
+  end
+  if testmode.enabled() then
+    publish_gauge(nodes, label)
+  end
+end
+
+local function show_labels(self)
+  local visible = 0
+  for id, label in pairs(hud_model.labels) do
+    local nodes = self.tags[id]
+    if nodes == nil then
+      nodes = gui.clone_tree(self.label_template)
+      gui.set_text(nodes[LABEL_NAME], label.name)
+      label.name_shown = gui.get_text(nodes[LABEL_NAME])
+      gui.set_color(nodes[LABEL_NAME], colour(palette.TEAMS[label.team]))
+      gui.set_outline(nodes[LABEL_NAME], colour(palette.INK))
+      gui.set_color(nodes[LABEL_HP], colour(palette.PAPER))
+      gui.set_outline(nodes[LABEL_HP], colour(palette.INK))
+      gui.set_color(nodes[LABEL_GAUGE], colour(palette.INK))
+      gui.set_color(nodes[LABEL_GAUGE_FILL], colour(palette.PAPER))
+      nodes.pos = vmath.vector3()
+      nodes.gauge_size = vmath.vector3(GAUGE_WIDTH, GAUGE_HEIGHT, 0)
+      self.tags[id] = nodes
+      hud_model.shown.label_fit = self.fit_factor
+    end
+    local box = nodes[LABEL]
+    local show = label.alive and label.x ~= nil
+    gui.set_enabled(box, show)
+    if show then
+      nodes.pos.x, nodes.pos.y = label.x, label.y
+      gui.set_screen_position(box, nodes.pos)
+      if nodes.hp ~= label.hp then
+        nodes.hp = label.hp
+        local tag = i18n.format("hud.tag", { letter = palette.LETTERS[label.team], hp = label.hp })
+        gui.set_text(nodes[LABEL_HP], tag)
+        label.shown = gui.get_text(nodes[LABEL_HP])
+      end
+      visible = visible + 1
+    end
+    show_gauge(nodes, label, show and label == hud_model.marker)
+  end
+  hud_model.shown.labels = visible
+  local marker = hud_model.marker
+  hud_model.shown.marker = marker ~= nil and marker.x ~= nil
+  gui.set_enabled(self.info.marker, hud_model.shown.marker)
+  if marker and marker.x then
+    local scale = hud_model.scale or 1
+    self.marker_pos.x, self.marker_pos.y = marker.x, marker.y + MARKER_ABOVE * scale
+    gui.set_screen_position(self.info.marker, self.marker_pos)
+  end
+end
+
+local function refit(self)
+  hud_model.shown.fit = widgets.fit(self, FIT)
+  gui.set_text(self.jump_label, i18n.t("hud.jump"))
+  hud_model.shown.jump = gui.get_text(self.jump_label)
+  self.climb_grey = nil
+  self.up_grey = nil
+  self.hp_origin = gui.get_position(self.hp_template)
+  measure_buttons(self)
+  for _, row in ipairs(self.hp_rows) do
+    gui.delete_node(row[HP_ROW])
+  end
+  for _, nodes in pairs(self.tags) do
+    gui.delete_node(nodes[LABEL])
+  end
+  for _, node in ipairs(self.pops) do
+    gui.delete_node(node)
+  end
+  self.hp_rows, self.tags, self.cache, self.pops = {}, {}, {}, {}
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refit(self)
+  end
+end
+
+function update(self)
+  if widgets.resized(self) then
+    refit(self)
+  end
+  show_turn(self)
+  show_teams(self)
+  show_labels(self)
+  show_controls(self)
+  show_target(self)
+  show_pops(self)
+  show_aim(self)
+  publish_buttons(self)
+  testmode.targets("hud", self.nodes)
+end

@@ -1,0 +1,21 @@
+#version 140
+
+in highp vec4 position;
+in mediump vec3 normal;
+
+out mediump float var_shade;
+
+uniform vs_uniforms
+{
+	highp mat4 mtx_viewproj;
+	mediump vec4 wave;
+};
+
+void main()
+{
+	vec3 p = position.xyz;
+	// normal.x marks the surface vertices (1) that ripple; wave.x is the time
+	p.y += normal.x * (0.9 * sin(wave.x * 2.0 + p.x * 0.35) + 0.5 * sin(wave.x * 3.1 + p.x * 0.9 + p.z * 0.4));
+	var_shade = 0.82 + 0.18 * normal.x;
+	gl_Position = mtx_viewproj * vec4(p, 1.0);
+}

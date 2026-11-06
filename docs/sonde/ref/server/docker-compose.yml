@@ -1,0 +1,38 @@
+name: spike-defold
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spike-postgres
+    environment:
+      POSTGRES_DB: nakama
+      POSTGRES_PASSWORD: localdb
+    volumes:
+      - spike-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "nakama"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  nakama:
+    image: registry.heroiclabs.com/heroiclabs/nakama:3.41.0
+    container_name: spike-nakama
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ecx
+      - >
+        /nakama/nakama migrate up --database.address postgres:localdb@postgres:5432/nakama &&
+        exec /nakama/nakama --name spike1 --database.address postgres:localdb@postgres:5432/nakama
+        --logger.level DEBUG --session.token_expiry_sec 7200 --runtime.path /nakama/data/modules
+        --console.username admin --console.password ${NAKAMA_CONSOLE_PASSWORD}
+    volumes:
+      - ./modules:/nakama/data/modules
+      - ../shared:/nakama/data/modules/shared:ro
+    ports:
+      - "7650:7350"
+      - "127.0.0.1:7651:7351"
+volumes:
+  spike-pgdata:
+    name: spike-pgdata

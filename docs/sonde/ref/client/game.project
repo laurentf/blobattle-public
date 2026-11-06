@@ -1,0 +1,37 @@
+[project]
+title = spike-defold
+dependencies#0 = https://github.com/heroiclabs/nakama-defold/archive/refs/tags/v3.4.0.zip
+dependencies#1 = https://github.com/defold/extension-websocket/archive/refs/tags/4.2.4.zip
+
+[bootstrap]
+main_collection = /main/main.collectionc
+
+[input]
+game_binding = /builtins/input/all.input_bindingc
+
+[display]
+width = 2048
+height = 1024
+high_dpi = 0
+
+[script]
+shared_state = 1
+
+[html5]
+scale_mode = stretch
+show_fullscreen_button = 0
+show_made_with_defold = 0
+heap_size = 256
+
+[render]
+clear_color_red = 0.45
+clear_color_green = 0.7
+clear_color_blue = 0.95
+clear_color_alpha = 1.0
+
+[spike]
+size = 2048
+bench = 0
+host = 127.0.0.1
+port = 7650
+net = 1

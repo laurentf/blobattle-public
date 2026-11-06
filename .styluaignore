@@ -1,0 +1,7 @@
+docs/
+spec/support/fixtures/
+client/shared
+client/build
+client/.internal
+out
+tmp

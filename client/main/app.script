@@ -1,0 +1,276 @@
+local LocalAuthority = require("authority.local_authority")
+local NakamaAuthority = require("authority.nakama_authority")
+local endpoint = require("net.endpoint")
+local keymap = require("input.keymap")
+local link = require("net.link")
+local nakama_link = require("net.nakama_link")
+local palette = require("ui.palette")
+local profile = require("main.profile")
+local rng = require("shared.sim.rng")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local text_fields = require("ui.text_fields")
+
+local SCREENS = { "home", "training", "keys", "end", "multi", "room" }
+local FIELDS = { home = true, multi = true }
+local ONLINE_SCREENS = { game = true, loading = true, ["end"] = true }
+local MENU_PROXY, GAME_PROXY = hash("menu_proxy"), hash("game_proxy")
+
+local function in_menus(self)
+  return self.screen ~= "game" and self.screen ~= "loading"
+end
+
+local function backdrop(self)
+  local menus = in_menus(self)
+  if menus and self.menu == nil then
+    self.menu = "loading"
+    msg.post("#menu_proxy", "load")
+  elseif not menus and self.menu == "loaded" then
+    self.menu = "unloading"
+    msg.post("#menu_proxy", "unload")
+  elseif self.menu == "loaded" then
+    msg.post("menu:/backdrop#backdrop", "title", { show = self.screen == "home" })
+  end
+  testmode.set("backdrop_loaded", self.menu == "loaded" or self.menu == "unloading")
+end
+
+local function show(self, screen)
+  text_fields.hide()
+  for name in pairs(FIELDS) do
+    if name ~= screen then
+      msg.post("#" .. name, "hidden")
+    end
+  end
+  for _, name in ipairs(SCREENS) do
+    msg.post("#" .. name, name == screen and "enable" or "disable")
+  end
+  if screen ~= "game" and screen ~= "loading" then
+    msg.post("#" .. screen, "refresh")
+  end
+  self.screen = screen
+  testmode.set("screen", screen)
+  backdrop(self)
+end
+
+local function seed()
+  local chosen = tonumber(testmode.param("seed") or "")
+  if chosen then
+    return chosen
+  end
+  return math.random(1, rng.MAX_SEED)
+end
+
+local function load_game(self)
+  if self.playing then
+    msg.post("#game_proxy", "unload")
+    self.reload = true
+  else
+    msg.post("#game_proxy", "load")
+  end
+  self.playing = true
+  show(self, "loading")
+end
+
+local function start_training(self)
+  local settings = {}
+  for key, value in pairs(session.settings) do
+    settings[key] = value
+  end
+  session.online = false
+  session.authority = LocalAuthority.new({
+    seed = seed(),
+    settings = settings,
+    player = session.profile,
+  })
+  load_game(self)
+end
+
+local function start_online(self, l)
+  self.game_seen = l.game
+  session.online = true
+  session.authority = NakamaAuthority.new({ link = l })
+  load_game(self)
+end
+
+local function stop_game(self)
+  if self.playing then
+    msg.post("#game_proxy", "unload")
+    self.playing = false
+  end
+end
+
+local function leave_room(self)
+  if session.link then
+    link.leave(session.link)
+  end
+  session.link, session.online, session.room_problem = nil, false, nil
+  self.game_seen = nil
+end
+
+local function enter_room(self, request)
+  leave_room(self)
+  self.seed_to_set = nil
+  session.multi_problem = nil
+  session.link = nakama_link.new(session.profile)
+  link.enter(session.link, request)
+  show(self, "multi")
+end
+
+local function publish_net(self, l)
+  if not testmode.enabled() then
+    return
+  end
+  local m = l and l.measures
+  local key = l
+    and table.concat(
+      { l.status, l.phase or "", l.game, m.rejoins, m.snapshot_bytes or 0, m.rtt_n or 0 },
+      "|"
+    )
+  if key ~= self.net_key then
+    self.net_key = key
+    testmode.put("net", l and {
+      status = l.status,
+      phase = l.phase,
+      game = l.game,
+      team = l.team,
+      code = l.code,
+      joined_s = m.joined_s,
+      rejoined_s = m.rejoined_s,
+      rejoins = m.rejoins,
+      snapshot_bytes = m.snapshot_bytes,
+      rtt_ms = m.rtt_ms,
+      rtt_avg_ms = m.rtt_avg_ms,
+      rtt_n = m.rtt_n,
+    })
+  end
+end
+
+local function follow_link(self)
+  local l = session.link
+  publish_net(self, l)
+  if l == nil then
+    return
+  end
+  link.update(l)
+  for _, m in ipairs(link.lobby_messages(l)) do
+    if m.name == "refused" then
+      session.room_problem = m.data.code
+    end
+  end
+  if l.status == "failed" then
+    session.multi_problem = l.reason
+    leave_room(self)
+    stop_game(self)
+    show(self, "multi")
+  elseif self.screen == "multi" and l.status == "joined" then
+    if self.seed_to_set then
+      link.send(l, "lobby_settings", { seed = self.seed_to_set })
+      self.seed_to_set = nil
+    end
+    show(self, "room")
+  elseif l.game > 0 and l.game ~= self.game_seen and l.phase ~= "lobby" then
+    start_online(self, l)
+  elseif session.online and l.phase == "lobby" and ONLINE_SCREENS[self.screen] then
+    stop_game(self)
+    show(self, "room")
+  end
+end
+
+local function orientation(self)
+  local width, height = window.get_size()
+  local portrait = height > width
+  local rotate = portrait and self.screen == "game"
+  if rotate ~= self.rotate then
+    self.rotate = rotate
+    msg.post("#rotate", rotate and "enable" or "disable")
+    testmode.set("rotate", rotate)
+  end
+end
+
+function init(self)
+  math.randomseed(os.time() + math.floor((socket.gettime() % 1) * 1000000))
+  testmode.init()
+  local sky = palette.SKY
+  msg.post("@render:", "clear_color", { color = vmath.vector4(sky[1], sky[2], sky[3], 1) })
+  msg.post(".", "acquire_input_focus")
+  session.profile = profile.load()
+  session.keys = keymap.load()
+  if html5 then
+    session.room_code = endpoint.room_param(html5.run("location.search"))
+    self.pending_room = session.room_code ~= nil
+  end
+  self.rotate = true
+  show(self, "intro")
+end
+
+function update(self)
+  orientation(self)
+  follow_link(self)
+  testmode.publish()
+end
+
+function on_message(self, message_id, message, sender)
+  if message_id == hash("show") then
+    stop_game(self)
+    if message.screen == "home" and self.pending_room then
+      self.pending_room = false
+      if not session.profile.fresh then
+        enter_room(self, { code = session.room_code })
+        return
+      end
+    end
+    if message.screen == "home" and session.link then
+      leave_room(self)
+    end
+    show(self, message.screen)
+  elseif message_id == hash("intro_over") then
+    msg.post("#intro", "disable")
+  elseif message_id == hash("start_training") then
+    start_training(self)
+  elseif message_id == hash("multi_create") then
+    local settings = {}
+    for key, value in pairs(session.settings) do
+      settings[key] = value
+    end
+    enter_room(self, { settings = settings })
+    self.seed_to_set = tonumber(testmode.param("seed") or "")
+  elseif message_id == hash("multi_join") then
+    enter_room(self, { code = message.code })
+  elseif message_id == hash("room_leave") then
+    leave_room(self)
+    stop_game(self)
+    show(self, "multi")
+  elseif message_id == hash("rematch") then
+    if session.link then
+      link.send(session.link, "rematch", {})
+    end
+  elseif message_id == hash("proxy_loaded") and sender.fragment == MENU_PROXY then
+    if in_menus(self) then
+      msg.post(sender, "init")
+      msg.post(sender, "enable")
+      self.menu = "loaded"
+    else
+      self.menu = "unloading"
+      msg.post(sender, "unload")
+    end
+    backdrop(self)
+  elseif message_id == hash("proxy_unloaded") and sender.fragment == MENU_PROXY then
+    self.menu = nil
+    backdrop(self)
+  elseif message_id == hash("proxy_loaded") and sender.fragment == GAME_PROXY then
+    msg.post(sender, "init")
+    msg.post(sender, "enable")
+    msg.post("game:/world#game", "start")
+    show(self, "game")
+  elseif message_id == hash("proxy_unloaded") then
+    if self.reload then
+      self.reload = false
+      msg.post("#game_proxy", "load")
+    end
+  elseif message_id == hash("game_over") then
+    session.result = message
+    msg.post("#game_proxy", "unload")
+    self.playing = false
+    show(self, "end")
+  end
+end

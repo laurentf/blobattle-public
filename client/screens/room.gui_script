@@ -1,0 +1,254 @@
+local endpoint = require("net.endpoint")
+local i18n = require("ui.i18n")
+local link = require("net.link")
+local palette = require("ui.palette")
+local room_view = require("ui.room_view")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local BUTTONS = {
+  "share",
+  "seat_1",
+  "seat_2",
+  "seat_3",
+  "seat_4",
+  "seat_5",
+  "seat_6",
+  "seat_7",
+  "seat_8",
+  "teams_minus",
+  "teams_plus",
+  "cats_minus",
+  "cats_plus",
+  "turn_cycle",
+  "map_cycle",
+  "bots_cycle",
+  "leave",
+  "launch",
+}
+local STEPPERS = { "teams", "cats" }
+local CYCLES = { "turn", "map", "bots" }
+local LABELS = {
+  teams = "training.teams",
+  cats = "training.cats",
+  turn = "room.turn",
+  map = "training.map",
+  bots = "training.bots",
+}
+local OPEN_ALPHA = 0.45
+local SHARE = [[
+(function (u) {
+  try {
+    if (window.isSecureContext && navigator.share) {
+      navigator.share({ url: u }).catch(function () {});
+      return 'share';
+    }
+    if (window.isSecureContext && navigator.clipboard) {
+      navigator.clipboard.writeText(u).catch(function () {});
+      return 'copy';
+    }
+    var area = document.createElement('textarea');
+    area.value = u;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    var done = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(area);
+    if (done) return 'copy';
+  } catch (e) {}
+  return 'show';
+})]]
+local SHARED_SECONDS = 2.5
+
+local FIT = { "title", "code", "share", "shared", "leave", "launch", "status", "problem" }
+for i = 1, room_view.SEATS do
+  FIT[#FIT + 1] = "seat_" .. i
+end
+for _, row in ipairs(STEPPERS) do
+  for _, part in ipairs({ "_label", "_minus", "_value", "_plus" }) do
+    FIT[#FIT + 1] = row .. part
+  end
+end
+for _, row in ipairs(CYCLES) do
+  FIT[#FIT + 1] = row .. "_label"
+  FIT[#FIT + 1] = row .. "_cycle"
+end
+
+local function reason_text(reason)
+  local id = "reason." .. reason
+  return i18n.has(id) and i18n.t(id) or i18n.t("reason.refused")
+end
+
+local function show_seats(v)
+  local shown = {}
+  for i, seat in ipairs(v.seats) do
+    local box = gui.get_node("seat_" .. i)
+    gui.set_enabled(box, seat.shown)
+    if seat.shown then
+      local open = seat.player == ""
+      gui.set_color(box, widgets.colour(palette.TEAMS[i], open and OPEN_ALPHA or 1))
+      local letter = gui.get_node("seat_" .. i .. "_letter")
+      gui.set_text(letter, palette.LETTERS[i])
+      gui.set_color(letter, widgets.colour(palette.INK))
+      gui.set_outline(letter, widgets.colour(palette.PAPER))
+      widgets.text("seat_" .. i .. "_team", seat.team)
+      widgets.text("seat_" .. i .. "_player", seat.player)
+      shown[i] = {
+        team = gui.get_text(gui.get_node("seat_" .. i .. "_team")),
+        player = gui.get_text(gui.get_node("seat_" .. i .. "_player")),
+        mine = seat.mine,
+      }
+    end
+  end
+  return shown
+end
+
+local function show_settings(v)
+  for _, row in ipairs(STEPPERS) do
+    local s = v.settings[row]
+    widgets.text(row .. "_label", i18n.t(LABELS[row]))
+    widgets.text(row .. "_value", s.text)
+    widgets.button(row .. "_minus", { text = i18n.t("training.less"), enabled = s.minus })
+    widgets.button(row .. "_plus", { text = i18n.t("training.more"), enabled = s.plus })
+  end
+  for _, row in ipairs(CYCLES) do
+    local s = v.settings[row]
+    widgets.text(row .. "_label", i18n.t(LABELS[row]))
+    widgets.button(row .. "_cycle", { text = s.text, enabled = s.cycle })
+  end
+end
+
+local function refresh(self)
+  local l = session.link
+  local lobby = l and l.lobby
+  self.lobby, self.status, self.problem = lobby, l and l.status, session.room_problem
+  widgets.text("title", i18n.t("room.title"))
+  widgets.text("code", (lobby and lobby.code) or (l and l.code) or "")
+  widgets.button("share", { text = i18n.t("room.share") })
+  local shared = gui.get_node("shared")
+  if self.shared_how == "show" then
+    widgets.text("shared", self.shared_link)
+  else
+    widgets.text("shared", i18n.t("room.shared"))
+  end
+  gui.set_enabled(shared, self.shared_until ~= nil)
+  widgets.button("leave", { text = i18n.t("room.leave") })
+  widgets.button("launch", { text = i18n.t("room.launch") })
+  local v = lobby and room_view.build(lobby, l.user_id)
+  self.view = v
+  local seats = {}
+  if v then
+    seats = show_seats(v)
+    show_settings(v)
+  end
+  for i = 1, room_view.SEATS do
+    if v == nil then
+      gui.set_enabled(gui.get_node("seat_" .. i), false)
+    end
+  end
+  gui.set_enabled(gui.get_node("launch"), v ~= nil and v.host)
+  local status = nil
+  if self.status == "reconnecting" then
+    status = i18n.t("room.reconnecting")
+  elseif v and not v.host then
+    status = i18n.t("room.waiting")
+  end
+  gui.set_enabled(widgets.text("status", status or ""), status ~= nil)
+  local problem = self.problem and reason_text(self.problem)
+  gui.set_enabled(widgets.text("problem", problem or "", palette.TEAMS[1]), problem ~= nil)
+  widgets.fit(self, FIT)
+  local targets = {}
+  for _, name in ipairs(BUTTONS) do
+    targets[name] = gui.get_node(name)
+  end
+  testmode.targets("room", targets)
+  testmode.put("room", {
+    code = gui.get_text(gui.get_node("code")),
+    host = v and v.host,
+    me = l and l.user_id,
+    status = self.status,
+    phase = l and l.phase,
+    settings = lobby and lobby.settings,
+    seats = seats,
+    shared = self.shared_link,
+    shared_how = self.shared_how,
+    problem = problem,
+    said = status,
+  })
+end
+
+local function share(self)
+  local l = session.link
+  if not html5 or l == nil or l.code == nil then
+    return
+  end
+  local place = json.decode(html5.run("JSON.stringify([location.origin, location.pathname])"))
+  local url = endpoint.room_link({ origin = place[1], pathname = place[2], code = l.code })
+  local how = html5.run(SHARE .. "(" .. json.encode(url) .. ")")
+  self.shared_link, self.shared_how = url, how
+  self.shared_until = socket.gettime() + SHARED_SECONDS
+  if how == "share" then
+    self.shared_until = nil
+  end
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  self.visible = false
+end
+
+function update(self)
+  if not self.visible then
+    return
+  end
+  local l = session.link
+  if self.shared_until and socket.gettime() > self.shared_until then
+    self.shared_until = nil
+    self.status = nil
+  end
+  if
+    widgets.resized(self)
+    or (l and (l.lobby ~= self.lobby or l.status ~= self.status))
+    or session.room_problem ~= self.problem
+  then
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  elseif message_id == hash("refresh") then
+    self.visible = true
+    refresh(self)
+  elseif message_id == hash("hidden") then
+    self.visible = false
+  end
+end
+
+function on_input(self, action_id, action)
+  if not self.visible then
+    return false
+  end
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  if pressed == nil then
+    return false
+  end
+  local l = session.link
+  session.room_problem = nil
+  if pressed == "leave" then
+    msg.post("main:/app#app", "room_leave")
+  elseif pressed == "share" then
+    share(self)
+  elseif self.view and l then
+    local name, body = room_view.request(self.view, pressed)
+    if name then
+      link.send(l, name, body)
+    end
+  end
+  refresh(self)
+  return true
+end

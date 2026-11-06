@@ -1,0 +1,38 @@
+[project]
+title = Blobattle
+bundle_resources = /res
+dependencies#0 = https://github.com/heroiclabs/nakama-defold/archive/refs/tags/v3.4.0.zip
+dependencies#1 = https://github.com/defold/extension-websocket/archive/refs/tags/4.2.4.zip
+
+[bootstrap]
+main_collection = /main/main.collectionc
+
+[input]
+game_binding = /input/game.input_bindingc
+
+[display]
+width = 844
+height = 390
+high_dpi = 1
+display_profiles = /main/blobattle.display_profilesc
+
+[script]
+shared_state = 1
+
+[mesh]
+max_count = 512
+
+[html5]
+htmlfile = /brand/engine_template.html
+splash_image = /brand/splash.png
+scale_mode = stretch
+show_fullscreen_button = 0
+show_made_with_defold = 0
+heap_size = 256
+
+[nakama]
+host = 127.0.0.1
+port = 7550
+
+[render]
+clear_color_alpha = 1.0

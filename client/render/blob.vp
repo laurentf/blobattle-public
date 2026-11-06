@@ -1,0 +1,32 @@
+#version 140
+
+in highp vec4 position;
+in mediump vec3 normal;
+
+out mediump vec3 var_normal;
+out mediump vec3 var_local;
+out mediump vec3 var_lnormal;
+
+uniform vs_uniforms
+{
+    highp mat4 mtx_worldview;
+    highp mat4 mtx_proj;
+    mediump mat4 mtx_normal;
+    mediump vec4 squash;
+    mediump vec4 wobble;
+};
+
+void main()
+{
+    vec3 p = position.xyz;
+    p.x = p.x * squash.x + p.y * squash.z;
+    p.z = p.z * squash.x;
+    p.y = p.y * squash.y;
+    float ripple = wobble.x * sin(wobble.y + position.y * 0.9 + position.x * 0.5);
+    p.x += ripple * sign(position.x) * 0.6;
+    p.y += ripple * 0.3 * position.y / 7.0;
+    var_normal = normalize((mtx_normal * vec4(normal, 0.0)).xyz);
+    var_local = position.xyz;
+    var_lnormal = normal;
+    gl_Position = mtx_proj * mtx_worldview * vec4(p, 1.0);
+}

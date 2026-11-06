@@ -1,0 +1,8 @@
+.env
+/cloudflared/
+*.log
+/tmp/
+node_modules/
+/out/
+/client/build/
+/client/.internal/

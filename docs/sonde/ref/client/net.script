@@ -1,0 +1,163 @@
+local ui = require "main.ui"
+local probe = require "shared.sim.probe"
+local gridbench = require "shared.sim.gridbench"
+local nakama = require "nakama.nakama"
+local defold = require "nakama.engine.defold"
+
+local OP_ECHO = 1
+local OP_TICK = 100
+
+local function log(self, s)
+	print("NET " .. s)
+	self.log[#self.log + 1] = s
+	if #self.log > 4 then table.remove(self.log, 1) end
+	ui.set("netlog", table.concat(self.log, "\n"))
+end
+
+local function compare(a, b, keys)
+	local out = {}
+	local all = true
+	for _, k in ipairs(keys) do
+		local same = tostring(a[k]) == tostring(b[k])
+		all = all and same
+		out[#out + 1] = k .. "=" .. tostring(a[k]) .. (same and "" or ("!=" .. tostring(b[k])))
+	end
+	return all, table.concat(out, " ")
+end
+
+local function send_echo(self)
+	if self.socket and self.match_id then
+		self.sent = self.sent + 1
+		local payload = json.encode({ n = self.sent, t = socket.gettime() })
+		self.socket.match_data_send(self.match_id, OP_ECHO, payload, nil, nil, function() end)
+	end
+end
+
+local function run(self)
+	local host = sys.get_config_string("spike.host", "127.0.0.1")
+	if ui.is_html5 then
+		local h = ui.js("window.location.hostname")
+		if h and h ~= "" then host = h end
+	end
+	host = ui.param("nhost", host)
+	local port = tonumber(ui.param("port", sys.get_config_string("spike.port", "7650")))
+	local use_ssl = ui.param("ssl", "0") == "1"
+	local client = nakama.create_client({
+		host = host, port = port, use_ssl = use_ssl,
+		username = "defaultkey", password = "",
+		engine = defold, timeout = 10,
+	})
+	self.client = client
+	log(self, "connecting to " .. host .. ":" .. port)
+	nakama.sync(function()
+		local t0 = socket.gettime()
+		local uuid = defold.uuid()
+		local session = client.authenticate_device(uuid, nil, true)
+		if not session or not session.token then
+			log(self, "auth FAILED " .. tostring(session and (session.message or session.error)))
+			self.result.auth = false
+			ui.publish("spikeNet", json.encode(self.result))
+			return
+		end
+		client.set_bearer_token(session.token)
+		self.result.auth = true
+		self.result.user_id = session.user_id
+		log(self, string.format("auth ok user %s (%.0fms)", tostring(session.user_id):sub(1, 8), (socket.gettime() - t0) * 1000))
+
+		local r = client.rpc_func("probe", "{}")
+		if r and r.payload then
+			local server = json.decode(r.payload)
+			self.result.server_probe = server
+			local ok, txt = compare(self.local_probe, server, { "fixed", "float", "trig", "xorshift" })
+			self.result.probe_match = ok
+			ui.set("probe", (ok and "PROBE MATCH " or "PROBE MISMATCH ") .. txt)
+		else
+			log(self, "probe rpc failed")
+		end
+
+		local g = client.rpc_func("grid_bench", json.encode({ w = self.local_grid.w, h = self.local_grid.h, lookups = 100000 }))
+		if g and g.payload then
+			local server = json.decode(g.payload)
+			self.result.server_grid = server
+			local ok, txt = compare(self.local_grid, server, { "grid_chk_before", "grid_chk_after" })
+			self.result.grid_match = ok
+			ui.set("grid", (ok and "GRID MATCH " or "GRID MISMATCH ") .. txt .. string.format(" (server carve %.2fms lookup %.0fns)", server.grid_carve_avg_ms, server.lookup_ns))
+		end
+
+		local sock = client.create_socket()
+		self.socket = sock
+		sock.on_match_data(function(message)
+			local md = message.match_data
+			local op = tonumber(md.op_code)
+			if op == OP_TICK then
+				self.ticks = self.ticks + 1
+				local d = json.decode(md.data)
+				self.result.last_tick = d.tick
+				self.result.ticks = self.ticks
+				ui.set("ticks", string.format("server ticks recv %d (tick %d, players %d)", self.ticks, d.tick, d.players))
+			elseif op == OP_ECHO then
+				self.echoes = self.echoes + 1
+				local d = json.decode(md.data)
+				local rtt = (socket.gettime() - d.t) * 1000
+				self.result.echoes = self.echoes
+				self.result.last_rtt_ms = rtt
+				ui.set("echo", string.format("echo recv %d/%d rtt %.1fms", self.echoes, self.sent, rtt))
+			end
+			ui.publish("spikeNet", json.encode(self.result))
+		end)
+		sock.on_disconnect(function()
+			log(self, "socket disconnected")
+		end)
+		local ok, err = sock.connect()
+		if not ok then
+			log(self, "socket connect FAILED " .. tostring(err))
+			self.result.socket = false
+			ui.publish("spikeNet", json.encode(self.result))
+			return
+		end
+		self.result.socket = true
+		log(self, "socket connected")
+		local cm = client.rpc_func("create_match", "{}")
+		if not cm or not cm.payload then
+			log(self, "create_match FAILED")
+			return
+		end
+		local match_id = json.decode(cm.payload).match_id
+		local joined = sock.match_join(match_id)
+		if joined and joined.match then
+			self.match_id = match_id
+			self.result.match_id = match_id
+			log(self, "joined match " .. match_id:sub(1, 13) .. "...")
+		else
+			log(self, "match_join FAILED " .. tostring(joined and joined.error and joined.error.message))
+			return
+		end
+		ui.publish("spikeNet", json.encode(self.result))
+		send_echo(self)
+		timer.delay(1, true, function() send_echo(self) end)
+	end)
+end
+
+function init(self)
+	self.log = {}
+	self.ticks, self.echoes, self.sent = 0, 0, 0
+	self.result = {}
+	local t0 = socket.gettime()
+	self.local_probe = probe.run()
+	self.local_probe.bench200k = string.format("%.0f", probe.bench(200000))
+	self.local_probe.bench200k_ms = (socket.gettime() - t0) * 1000
+	self.local_grid = gridbench.run(tonumber(ui.param("size", "2048")) == 3072 and 3072 or 2048, tonumber(ui.param("size", "2048")) == 3072 and 1536 or 1024, socket.gettime, 50000)
+	self.result.client_probe = self.local_probe
+	self.result.client_grid = self.local_grid
+	ui.set("probe", string.format("client probe fixed=%s float=%s trig=%s xorshift=%s (%s)", self.local_probe.fixed, self.local_probe.float, self.local_probe.trig, self.local_probe.xorshift, tostring(self.local_probe.jit or self.local_probe.version)))
+	ui.publish("spikeProbe", json.encode(self.local_probe))
+	if sys.get_config_int("spike.net", 1) == 1 and ui.param("net", "1") == "1" then
+		run(self)
+	end
+end
+
+function on_message(self, message_id, message)
+	if message_id == hash("cmd") and message.cmd == "echo" then
+		send_echo(self)
+	end
+end

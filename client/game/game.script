@@ -1,0 +1,1678 @@
+local arm = require("render.arm")
+local bubbles = require("render.bubbles")
+local buffers = require("render.buffers")
+local camera_rig = require("game.camera_rig")
+local tide = require("render.tide")
+local waves = require("render.waves")
+local clouds = require("render.clouds")
+local controls = require("input.controls")
+local director = require("game.director")
+local faces = require("render.faces")
+local fuse = require("render.fuse")
+local hud_model = require("game.hud_model")
+local i18n = require("ui.i18n")
+local jelly = require("render.jelly")
+local keymap = require("input.keymap")
+local materials = require("render.materials")
+local measures = require("game.measures")
+local moods = require("game.moods")
+local models = require("game.models")
+local palette = require("ui.palette")
+local paths = require("render.paths")
+local playback = require("game.playback")
+local quake = require("shared.sim.quake")
+local rules = require("shared.sim.rules")
+local session = require("main.session")
+local shapes = require("render.shapes")
+local pointer = require("ui.pointer")
+local terrain = require("shared.sim.terrain")
+local terrain_view = require("game.terrain_view")
+local testmode = require("ui.testmode")
+local touch_router = require("game.touch_router")
+local trace = require("game.trace")
+local tremor = require("game.tremor")
+local turn_rules = require("shared.sim.turn")
+local turn_clock = require("game.turn_clock")
+local voxel_mesh = require("render.voxel_mesh")
+local weapons = require("shared.sim.weapons.registry")
+
+local FP = 256
+local REBUILD_LIMIT_MS = 3
+local FLASH_SECONDS = 0.4
+local DEBRIS = 14
+local DEBRIS_GRAVITY = 120
+local DUST = 18
+local DUST_DEPTH = 12
+local SHOT_SPIN_SECONDS = 0.7
+local ROCKETS = { bazooka = true, airstrike_shell = true }
+local BITS = { cluster_bit = true }
+local PLANE_SPEED, PLANE_ABOVE, PLANE_MARGIN = 260, 22, 40
+local POP_SECONDS = 1.5
+local WADDLER_SCALE = 0.55
+local WADDLER_FLASH_TICKS, WADDLER_FLASH_SECONDS = 60, 0.15
+local PACK_BACK, PACK_UP = 3.2, 3.5
+local PACK_SCALE = vmath.vector3(1.6, 2.6, 1.6)
+local FLAMES = 3
+local STICKS = { dynamite = true }
+local ROCKET_SCALE = 1.3
+local FUSE_WIDTH = 0.3
+local SPARK_HIDDEN = 0.001
+local TRAIL_EVERY = 0.05
+local TRAIL_SECONDS = 0.6
+local LIQUID_BOTTOM = -30
+local PUDDLE_GRAVITY = 160
+local PUDDLE_REACH = 2
+local BLOB_MIDDLE = 3.5
+local BLOB_RADIUS = 3.5
+local LABEL_ABOVE = 9
+local WHEEL_ZOOM = 1.15
+local ARM_THICK, ARM_THIN = 1.6, 0.9
+local ARM_OVERLAP = 0.35
+local RESYNC_SECONDS = rules.SNAPSHOT_REQUEST_TICKS / rules.TICKS_PER_SECOND
+
+local function colour(rgb, w)
+  return vmath.vector4(rgb[1], rgb[2], rgb[3], w or 1)
+end
+
+local function now()
+  return os.clock()
+end
+
+local function world_xy(self, x_fp, y_fp)
+  return x_fp / FP, self.height - y_fp / FP - 1
+end
+
+local function cube(self, pos, tint, scale)
+  local id = factory.create("#cube_factory", pos)
+  local body = msg.url(nil, id, "body")
+  go.set(body, "vertices", models.get(self.models, "cube"))
+  go.set(body, "tint", tint)
+  go.set_scale(scale, id)
+  return id
+end
+
+local function spin(id, seconds)
+  go.set_rotation(vmath.quat_rotation_x(0.6), id)
+  go.animate(id, "euler.z", go.PLAYBACK_LOOP_FORWARD, 360, go.EASING_LINEAR, seconds)
+end
+
+local function build_liquid(self)
+  local w = self.world
+  local part = buffers.seal(shapes.liquid({
+    x0 = -rules.OUT_MARGIN,
+    x1 = w.terrain.width + rules.OUT_MARGIN,
+    top = self.height - w.liquid.level,
+    bottom = LIQUID_BOTTOM - rules.LAVA_RISE * (rules.MAX_ROUNDS - rules.LAVA_RISE_FROM + 1),
+  }))
+  self.liquid_path = paths.next("liquid")
+  local res = resource.create_buffer(self.liquid_path, { buffer = part.buf })
+  go.set("/liquid#mesh", "vertices", res)
+  local kind = w.liquid.kind == "lava" and palette.LAVA or palette.WATER
+  go.set("/liquid#mesh", "tint", colour(kind))
+end
+
+local function spawn_blobs(self)
+  for _, name in ipairs(faces.NAMES) do
+    models.get(self.models, "face_" .. name)
+  end
+  models.get(self.models, "rocket")
+  models.get(self.models, "dynamite")
+  for _, name in ipairs({ "crate", "crate_mark", "chute", "plane" }) do
+    models.get(self.models, name)
+  end
+  for _, c in ipairs(self.world.cats) do
+    local id = factory.create("#blob_factory")
+    local body, eyes = msg.url(nil, id, "body"), msg.url(nil, id, "eyes")
+    go.set(body, "vertices", models.get(self.models, "blob"))
+    go.set(eyes, "vertices", models.get(self.models, "face_calm"))
+    go.set(body, "tint", colour(palette.TEAMS[c.team]))
+    go.set(eyes, "tint", colour(palette.EYES, 0))
+    self.blobs[c.id] = {
+      id = id,
+      body = body,
+      eyes = eyes,
+      jelly = jelly.new(c.id * 1.7),
+      shape = {},
+      motion = { vx = 0, vy = 0, walk = 0 },
+      squash = vmath.vector4(1, 1, 0, 0),
+      wobble = vmath.vector4(0, 0, 0, 0),
+      pos = vmath.vector3(),
+      facing = 0,
+      grey = false,
+      face = "calm",
+    }
+  end
+end
+
+local function spawn_arm(self)
+  self.arm_parts = {}
+  for i = 1, arm.SEGMENTS do
+    local id = cube(self, vmath.vector3(), colour(palette.INK, 0), 1)
+    msg.post(id, "disable")
+    self.arm_parts[i] = {
+      id = id,
+      body = msg.url(nil, id, "body"),
+      pos = vmath.vector3(),
+      scale = vmath.vector3(1, 1, 1),
+      shown = false,
+    }
+  end
+end
+
+local function throw_arm(self, e)
+  local c = self.world.cats[e.cat]
+  self.arm_cat = e.cat
+  for _, part in ipairs(self.arm_parts) do
+    go.set(part.body, "tint", colour(palette.TEAMS[c.team], 0))
+  end
+  local x, y = e.x + 0.5, self.height - e.y - 0.5
+  if e.type == "tentacle_hooked" then
+    arm.hooked(self.arm, x, y)
+  else
+    arm.missed(self.arm, x, y)
+  end
+end
+
+local function update_arm(self, dt)
+  local b = self.blobs[self.arm_cat]
+  local c = self.world.cats[self.arm_cat]
+  local count = 0
+  if b and b.x then
+    arm.step(self.arm, dt, (math.abs(c.vx) + math.abs(c.vy)) / FP)
+    local from = self.arm_from
+    from.x, from.y = b.x, b.y + BLOB_MIDDLE
+    count = arm.points(self.arm, from, self.arm_points)
+  end
+  local points = self.arm_points
+  for i, part in ipairs(self.arm_parts) do
+    local show = i < count
+    if show ~= part.shown then
+      part.shown = show
+      msg.post(part.id, show and "enable" or "disable")
+    end
+    if show then
+      local a, z = points[i], points[i + 1]
+      local dx, dy = z.x - a.x, z.y - a.y
+      local thick = ARM_THICK + (ARM_THIN - ARM_THICK) * i / arm.SEGMENTS
+      part.pos.x, part.pos.y = (a.x + z.x) / 2, (a.y + z.y) / 2
+      part.scale.x = math.sqrt(dx * dx + dy * dy) + ARM_OVERLAP
+      part.scale.y, part.scale.z = thick, thick
+      go.set_position(part.pos, part.id)
+      go.set_scale(part.scale, part.id)
+      go.set(part.id, "euler.z", math.deg(math.atan2(dy, dx)))
+    end
+  end
+  self.arm_shown = count > 0 and count - 1 or 0
+end
+
+local function explode(self, e)
+  local centre = vmath.vector3(e.x + 0.5, self.height - e.y - 0.5, 3)
+  local flash = cube(self, centre, colour(palette.FLASH, 0), 3)
+  go.set_rotation(vmath.quat_rotation_z(0.6) * vmath.quat_rotation_x(0.5), flash)
+  go.animate(
+    flash,
+    "scale",
+    go.PLAYBACK_ONCE_FORWARD,
+    vmath.vector3(e.radius * 1.6),
+    go.EASING_OUTQUAD,
+    FLASH_SECONDS,
+    0,
+    function()
+      go.delete(flash)
+    end
+  )
+  for k = 1, DEBRIS do
+    local a = math.random() * math.pi
+    local speed = 25 + math.random() * 45
+    local tint = palette.DEBRIS[k % #palette.DEBRIS + 1]
+    local id = cube(self, centre, colour(tint, 0), 0.8 + math.random() * 0.8)
+    spin(id, 0.3 + math.random() * 0.6)
+    self.debris[#self.debris + 1] = {
+      id = id,
+      pos = vmath.vector3(centre.x, centre.y, (math.random() - 0.5) * 16),
+      vx = math.cos(a) * speed,
+      vy = math.sin(a) * speed,
+      life = 0.9 + math.random() * 0.4,
+    }
+  end
+  self.shake = 1
+end
+
+local function crumb(self, e)
+  local c = self.world.cats[e.cat]
+  local back = math.pi + c.dig_angle / 1024 * 2 * math.pi + (math.random() - 0.5) * 1.2
+  local speed = 12 + math.random() * 18
+  local centre = vmath.vector3(e.x + 0.5, self.height - e.y - 0.5, 3)
+  local tint = palette.DEBRIS[math.random(#palette.DEBRIS)]
+  local id = cube(self, centre, colour(tint, 0), 0.5 + math.random() * 0.4)
+  spin(id, 0.3 + math.random() * 0.4)
+  self.debris[#self.debris + 1] = {
+    id = id,
+    pos = vmath.vector3(centre.x, centre.y, (math.random() - 0.5) * 8),
+    vx = math.cos(back) * speed,
+    vy = math.sin(back) * speed + 10,
+    life = 0.5 + math.random() * 0.3,
+  }
+end
+
+local function open_crack(self, e)
+  local area = voxel_mesh.crack_area(e, self.world.liquid.level)
+  local bottom = area.y1
+  terrain_view.region(self.terrain, area, "crack")
+  local depth = math.min(DUST_DEPTH, bottom - e.top)
+  for k = 1, DUST do
+    local centre =
+      vmath.vector3(e.x + math.random() * e.width, self.height - e.top - math.random() * depth, 3)
+    local tint = palette.DEBRIS[k % #palette.DEBRIS + 1]
+    local id = cube(self, centre, colour(tint, 0), 0.5 + math.random() * 0.7)
+    spin(id, 0.3 + math.random() * 0.5)
+    self.debris[#self.debris + 1] = {
+      id = id,
+      pos = vmath.vector3(centre.x, centre.y, (math.random() - 0.5) * 14),
+      vx = (math.random() - 0.5) * 36,
+      vy = 30 + math.random() * 45,
+      life = 0.7 + math.random() * 0.6,
+      dust = true,
+    }
+  end
+  local fx = self.quake_fx
+  fx.dust = fx.dust + DUST
+  fx.opened[#fx.opened + 1] = { x = e.x, width = e.width, top = e.top }
+end
+
+local function dust_live(self)
+  local count = 0
+  for _, d in ipairs(self.debris) do
+    if d.dust then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local CHECKS_KEPT = 8
+local CHECK_ABOVE = 8
+
+local function check_crack(self, crack, top)
+  local w, mesh = self.world, self.terrain.mesh
+  local bottom = w.liquid.level + rules.CRACK_BELOW
+  local found = { x = crack.x, width = crack.width, drawn = 0, solid = 0, agree = 0, edges = 0 }
+  local from = math.min(top, crack.top)
+  for y = math.max(0, from - CHECK_ABOVE), bottom do
+    local x0 = crack.x + quake.offset(crack, y)
+    local x1 = x0 + crack.width - 1
+    for x = x0, x1 do
+      found.drawn = found.drawn + (voxel_mesh.front(mesh, x, y) and 1 or 0)
+      found.solid = found.solid + (terrain.solid(w.terrain, x, y) and 1 or 0)
+    end
+    if y >= from and y < w.liquid.level then
+      for _, x in ipairs({ x0 - 1, x1 + 1 }) do
+        found.edges = found.edges + 1
+        if voxel_mesh.front(mesh, x, y) == terrain.solid(w.terrain, x, y) then
+          found.agree = found.agree + 1
+        end
+      end
+    end
+  end
+  return found
+end
+
+local function check_cracks(self)
+  local fx = self.quake_fx
+  if not testmode.enabled() then
+    fx.opened = {}
+    return
+  end
+  for _, opened in ipairs(fx.opened) do
+    for _, crack in ipairs(self.world.cracks) do
+      if crack.x == opened.x and crack.width == opened.width then
+        if #fx.checks == CHECKS_KEPT then
+          table.remove(fx.checks, 1)
+        end
+        fx.checks[#fx.checks + 1] = check_crack(self, crack, opened.top)
+      end
+    end
+  end
+  fx.opened = {}
+  fx.changed = true
+end
+
+local function follow_trace(self, events, inputs)
+  local t = self.trace
+  if t == nil then
+    return
+  end
+  local w = self.world
+  trace.step(t, w.tick, inputs, events, w.cats[w.turn.cat])
+  local onsets = self.mood_fields.onsets
+  for i, onset in ipairs(onsets) do
+    trace.face(t, w.tick, onset.id, onset.face)
+    onsets[i] = nil
+  end
+end
+
+local function shaped(self, pos, tint, name)
+  local id = cube(self, pos, colour(tint), 1)
+  go.set(msg.url(nil, id, "body"), "vertices", models.get(self.models, name))
+  return id
+end
+
+local function fly_plane(self, column)
+  local start = (column - PLANE_MARGIN) / 2
+  local to = self.world.terrain.width + PLANE_MARGIN
+  local pos = vmath.vector3(start, self.height + PLANE_ABOVE, 0)
+  local id = shaped(self, pos, palette.PLANE, "plane")
+  self.planes, self.planes_flown = self.planes + 1, self.planes_flown + 1
+  go.animate(
+    id,
+    "position.x",
+    go.PLAYBACK_ONCE_FORWARD,
+    to,
+    go.EASING_LINEAR,
+    (to - start) / PLANE_SPEED,
+    0,
+    function()
+      go.delete(id)
+      self.planes = self.planes - 1
+    end
+  )
+end
+
+local function strike_column(self)
+  local sum, count = 0, 0
+  for _, p in ipairs(self.world.projectiles) do
+    if p.alive and p.weapon == "airstrike_shell" and p.age <= 1 then
+      sum, count = sum + p.x / FP, count + 1
+    end
+  end
+  return count > 0 and sum / count or nil
+end
+
+local function on_events(self, events, inputs)
+  local fields = self.mood_fields
+  fields.world, fields.now = self.world, self.world.tick / rules.TICKS_PER_SECOND
+  moods.react(self.moods, events, fields)
+  follow_trace(self, events, inputs)
+  for _, e in ipairs(events) do
+    local at = self.director_fields
+    at.now = self.time
+    if e.type == "exploded" then
+      at.x, at.y = e.x + 0.5, self.height - e.y - 0.5
+    elseif e.type == "cracked" then
+      at.x, at.y = e.x + e.width / 2, self.height - e.top
+    end
+    director.event(self.director, e, at)
+    if e.type == "exploded" then
+      terrain_view.crater(self.terrain, e)
+      explode(self, e)
+    elseif e.type == "chomped" then
+      terrain_view.crater(self.terrain, e)
+      crumb(self, e)
+    elseif e.type == "cracked" then
+      open_crack(self, e)
+      self.quake_fx.changed = true
+    elseif e.type == "shook" then
+      tremor.shake(self.tremor, quake.strength(e.n))
+      self.quake_fx.shakes = self.quake_fx.shakes + 1
+      self.quake_fx.changed = true
+    elseif e.type == "quaked" then
+      local fx = self.quake_fx
+      fx.quakes = fx.quakes + 1
+      fx.peaks[#fx.peaks + 1] = 0
+      fx.changed = true
+    elseif e.type == "turn_started" then
+      camera_rig.turn(self.rig)
+      self.glide_pending = true
+    elseif e.type == "tentacle_hooked" or e.type == "tentacle_missed" then
+      throw_arm(self, e)
+    elseif e.type == "tentacle_released" then
+      arm.released(self.arm)
+    elseif e.type == "crate_dropped" then
+      fly_plane(self, e.x)
+    elseif e.type == "crate_picked" then
+      local name = i18n.t("weapon." .. e.weapon)
+      self.pops[#self.pops + 1] =
+        { cat = e.cat, age = 0, text = i18n.format("hud.picked", { name = name }) }
+      self.picked[#self.picked + 1] = e.weapon
+    elseif e.type == "fired" then
+      if e.weapon == "airstrike" then
+        local column = strike_column(self)
+        if column then
+          fly_plane(self, column)
+        end
+      end
+      camera_rig.shot(self.rig)
+      local b = self.blobs[e.cat]
+      if b then
+        jelly.event(b.jelly, e)
+      end
+    else
+      local b = e.cat and self.blobs[e.cat]
+      if b then
+        jelly.event(b.jelly, e)
+      end
+    end
+  end
+end
+
+local function ground_below(self, px, y)
+  local t = self.world.terrain
+  local liquid = self.world.liquid.level
+  local row = math.max(0, math.ceil(self.height - y))
+  while row < liquid do
+    for x = px - PUDDLE_REACH, px + PUDDLE_REACH do
+      if terrain.solid(t, x, row) then
+        return self.height - row
+      end
+    end
+    row = row + 1
+  end
+  return self.height - liquid - 3
+end
+
+local function fall_dead(self, b, c, dt)
+  if b.fall_y == nil then
+    b.fall_y, b.fall_v = b.y, 0
+  end
+  local floor_y = ground_below(self, math.floor(c.x / FP), b.fall_y)
+  if b.fall_y > floor_y then
+    b.fall_v = b.fall_v + PUDDLE_GRAVITY * dt
+    b.fall_y = math.max(floor_y, b.fall_y - b.fall_v * dt)
+  else
+    b.fall_y, b.fall_v = floor_y, 0
+  end
+  return b.fall_y
+end
+
+local function update_blobs(self, dt, alpha)
+  local seconds = (self.world.tick + alpha) / rules.TICKS_PER_SECOND
+  for _, c in ipairs(self.world.cats) do
+    local b = self.blobs[c.id]
+    local before = self.playback.before(c.id)
+    local x, y =
+      world_xy(self, before.x + (c.x - before.x) * alpha, before.y + (c.y - before.y) * alpha)
+    if not c.alive and b.x then
+      y = fall_dead(self, b, c, dt)
+    end
+    b.pos.x, b.pos.y = x, y
+    go.set_position(b.pos, b.id)
+    b.x, b.y = x, y
+    local walking = c.gauge >= rules.GAUGE_WALK and c.walk or 0
+    b.motion.vx, b.motion.vy, b.motion.walk = c.vx / FP, c.vy / FP, walking
+    jelly.step(b.jelly, dt, b.motion)
+    local s = jelly.shape(b.jelly, b.shape)
+    b.squash.x, b.squash.y, b.squash.z = s.sx, s.sy, -s.lean
+    b.wobble.x, b.wobble.y = s.wobble, s.phase
+    go.set(b.body, "squash", b.squash)
+    go.set(b.eyes, "squash", b.squash)
+    go.set(b.body, "wobble", b.wobble)
+    go.set(b.eyes, "wobble", b.wobble)
+    if s.dead and not b.grey then
+      go.set(b.body, "tint", colour(palette.DEAD))
+      b.grey = true
+    end
+    local face = s.dead and "calm" or moods.face(self.moods, c.id, seconds)
+    if face ~= b.face then
+      b.face = face
+      self.faces_changed = true
+      go.set(b.eyes, "vertices", models.get(self.models, "face_" .. face))
+    end
+    if b.facing ~= c.facing then
+      b.facing = c.facing
+      go.set_rotation(vmath.quat_rotation_y(c.facing * 0.5), b.id)
+    end
+  end
+end
+
+local function puff(self, pos)
+  local id = cube(self, pos, self.smoke, 0.9)
+  go.animate(id, "scale", go.PLAYBACK_ONCE_FORWARD, 0.1, go.EASING_INQUAD, TRAIL_SECONDS)
+  go.animate(
+    id,
+    "position.y",
+    go.PLAYBACK_ONCE_FORWARD,
+    pos.y + 3,
+    go.EASING_OUTQUAD,
+    TRAIL_SECONDS,
+    0,
+    function()
+      go.delete(id)
+    end
+  )
+end
+
+local function fly_rocket(self, shot, p)
+  if p.vx == 0 and p.vy == 0 then
+    return
+  end
+  local angle = math.atan2(-p.vy, p.vx)
+  go.set(shot.id, "euler.z", math.deg(angle))
+  shot.trail = shot.trail - self.frame_dt
+  if shot.trail <= 0 then
+    shot.trail = TRAIL_EVERY
+    local tail = self.trail_pos
+    tail.x = shot.pos.x - math.cos(angle) * 2
+    tail.y = shot.pos.y - math.sin(angle) * 2
+    tail.z = shot.pos.z
+    puff(self, tail)
+  end
+end
+
+local function burn(self, shot)
+  local pos = shot.pos
+  local stem = shot.stem_pos
+  stem.x, stem.y, stem.z = pos.x, pos.y + (fuse.BASE + fuse.TIP) / 2, pos.z
+  go.set_position(stem, shot.stem_id)
+  fuse.step(shot.sparks, self.frame_dt)
+  local cubes, shape, spark_pos = shot.spark_cubes, self.spark_shape, self.spark_pos
+  for _, spark in ipairs(shot.sparks.list) do
+    local id = cubes[spark]
+    if id == nil then
+      id = cube(self, pos, self.spark_tints[spark.colour], 0.1)
+      cubes[spark] = id
+      shot.cubes_made = shot.cubes_made + 1
+      self.stick_objects = self.stick_objects + 1
+    end
+    fuse.shape(spark, shape)
+    spark_pos.x, spark_pos.y, spark_pos.z = pos.x + shape.x, pos.y + fuse.TIP + shape.y, pos.z
+    go.set_position(spark_pos, id)
+    go.set_scale(shape.size, id)
+  end
+  for spark, id in pairs(cubes) do
+    if spark.age >= spark.life then
+      go.set_scale(SPARK_HIDDEN, id)
+    end
+  end
+end
+
+local function put_out(self, shot)
+  go.delete(shot.id)
+  if shot.stem_id then
+    go.delete(shot.stem_id)
+    local gone = 2
+    for _, id in pairs(shot.spark_cubes) do
+      go.delete(id)
+      gone = gone + 1
+    end
+    self.stick_objects = self.stick_objects - gone
+  end
+end
+
+local function update_shots(self, alpha)
+  local seen = self.seen_shots
+  for k in pairs(seen) do
+    seen[k] = nil
+  end
+  for _, p in ipairs(self.world.projectiles) do
+    if p.alive then
+      seen[p.id] = true
+      local before = self.playback.before_shot(p.id) or p
+      local x, y =
+        world_xy(self, before.x + (p.x - before.x) * alpha, before.y + (p.y - before.y) * alpha)
+      local shot = self.shots[p.id]
+      if shot == nil and weapons.get(p.weapon).kind == "walker" then
+        shot = { pos = vmath.vector3(x, y, 0), walker = true, placed = false }
+        shot.id = factory.create("#blob_factory", shot.pos)
+        shot.body, shot.eyes = msg.url(nil, shot.id, "body"), msg.url(nil, shot.id, "eyes")
+        go.set(shot.body, "vertices", models.get(self.models, "blob"))
+        go.set(shot.eyes, "vertices", models.get(self.models, "face_calm"))
+        go.set(shot.eyes, "tint", colour(palette.EYES, 0))
+        go.set_scale(WADDLER_SCALE, shot.id)
+        shot.tint, shot.flash = colour(palette.SHOTS[p.weapon]), colour(palette.TARGET)
+        self.shots[p.id] = shot
+        self.waddlers = self.waddlers + 1
+      end
+      if shot and shot.walker then
+        shot.pos.x, shot.pos.y = x, y
+        go.set_position(shot.pos, shot.id)
+        if shot.facing ~= p.facing then
+          shot.facing = p.facing
+          go.set_rotation(vmath.quat_rotation_y(p.facing * 0.5), shot.id)
+        end
+        local blink = p.fuse < WADDLER_FLASH_TICKS
+          and math.floor(self.time / WADDLER_FLASH_SECONDS) % 2 == 0
+        go.set(shot.body, "tint", blink and shot.flash or shot.tint)
+        if blink then
+          self.blinking = true
+        end
+        self.focus_x, self.focus_y = x, y
+      end
+      if shot == nil then
+        shot = { pos = vmath.vector3(x, y + 1, 0), spinning = false, rocket = ROCKETS[p.weapon] }
+        shot.placed = not director.follows(p.weapon)
+        local tint = palette.SHOTS[p.weapon]
+        if BITS[p.weapon] then
+          local k = p.id % #palette.BITS + 1
+          tint = palette.BITS[k]
+          if not self.bit_tints[k] then
+            self.bit_tints[k] = true
+            self.bit_colours = self.bit_colours + 1
+          end
+        end
+        shot.tint = tint
+        shot.id = cube(self, shot.pos, colour(tint), 2)
+        if shot.rocket then
+          go.set(msg.url(nil, shot.id, "body"), "vertices", models.get(self.models, "rocket"))
+          go.set_scale(ROCKET_SCALE, shot.id)
+          shot.trail = 0
+        elseif STICKS[p.weapon] then
+          go.set(msg.url(nil, shot.id, "body"), "vertices", models.get(self.models, "dynamite"))
+          go.set_scale(1, shot.id)
+          shot.pos.z = fuse.Z
+          shot.stem_pos = vmath.vector3(x, y + 1, fuse.Z)
+          shot.stem_id = cube(self, shot.stem_pos, self.fuse_tint, self.stem_scale)
+          shot.sparks, shot.spark_cubes, shot.cubes_made = fuse.new(), {}, 0
+          self.stick_objects = self.stick_objects + 2
+        end
+        self.shots[p.id] = shot
+      end
+      if not shot.walker then
+        shot.pos.x, shot.pos.y = x, y + 1
+        go.set_position(shot.pos, shot.id)
+      end
+      if shot.walker then
+        shot.spinning = false
+      elseif shot.rocket then
+        fly_rocket(self, shot, p)
+      elseif shot.stem_id then
+        burn(self, shot)
+      elseif p.resting and shot.spinning then
+        go.cancel_animations(shot.id, "euler.z")
+        shot.spinning = false
+      elseif not p.resting and not shot.spinning then
+        spin(shot.id, SHOT_SPIN_SECONDS)
+        shot.spinning = true
+      end
+      if not shot.placed then
+        self.focus_x, self.focus_y = x, y
+      end
+    end
+  end
+  for id, shot in pairs(self.shots) do
+    if not seen[id] then
+      put_out(self, shot)
+      self.shots[id] = nil
+    end
+  end
+end
+
+local function update_crates(self, alpha)
+  local seen = self.seen_crates
+  for k in pairs(seen) do
+    seen[k] = nil
+  end
+  local falling = nil
+  for _, k in ipairs(self.world.crates) do
+    if k.alive then
+      seen[k.id] = true
+      local x, y = world_xy(self, k.x - k.vx * (1 - alpha), k.y - k.vy * (1 - alpha))
+      local view = self.crates[k.id]
+      if view == nil then
+        view = { pos = vmath.vector3(x - 0.5, y, 0), chute = true }
+        view.id = shaped(self, view.pos, palette.CRATE, "crate")
+        view.mark_id = shaped(self, view.pos, palette.CRATE_MARK, "crate_mark")
+        view.chute_id = shaped(self, view.pos, palette.CHUTE, "chute")
+        self.crates[k.id] = view
+      end
+      view.pos.x, view.pos.y = x - 0.5, y
+      go.set_position(view.pos, view.id)
+      go.set_position(view.pos, view.mark_id)
+      if view.chute then
+        go.set_position(view.pos, view.chute_id)
+      end
+      if view.chute and not k.chute then
+        view.chute = false
+        go.delete(view.chute_id)
+      end
+      view.weapon, view.falling = k.weapon, k.chute
+      if k.chute and falling == nil then
+        falling = view
+      end
+    end
+  end
+  for id, view in pairs(self.crates) do
+    if not seen[id] then
+      go.delete(view.id)
+      go.delete(view.mark_id)
+      if view.chute then
+        go.delete(view.chute_id)
+      end
+      self.crates[id] = nil
+    end
+  end
+  self.falling_crate = falling
+end
+
+local function jet_parts(self)
+  local parts = self.jet
+  if parts == nil then
+    parts = { pos = vmath.vector3(), flames = {} }
+    parts.pack = cube(self, parts.pos, colour(palette.PLANE), 1)
+    go.set_scale(PACK_SCALE, parts.pack)
+    for i = 1, FLAMES do
+      local tint = palette.SPARKS[i % #palette.SPARKS + 1]
+      parts.flames[i] = cube(self, parts.pos, colour(tint), 1)
+    end
+    self.jet = parts
+  end
+  return parts
+end
+
+local function update_jet(self)
+  local w = self.world
+  local c = w.cats[w.turn.cat]
+  local b = c and self.blobs[c.id]
+  local burning = c ~= nil and c.alive and c.jet > 0 and b ~= nil and b.x ~= nil
+  local thrusting = burning and (c.climb < 0 or c.walk ~= 0)
+  if not burning and self.jet == nil then
+    self.flames_shown = 0
+    return
+  end
+  local parts = jet_parts(self)
+  local pos = parts.pos
+  if parts.burning ~= burning then
+    parts.burning = burning
+    msg.post(parts.pack, burning and "enable" or "disable")
+  end
+  if burning then
+    pos.x, pos.y, pos.z = b.x - c.facing * PACK_BACK, b.y + PACK_UP, 0
+    go.set_position(pos, parts.pack)
+  end
+  self.flames_shown = 0
+  local changed = parts.thrusting ~= thrusting
+  parts.thrusting = thrusting
+  for i, id in ipairs(parts.flames) do
+    if changed then
+      msg.post(id, thrusting and "enable" or "disable")
+    end
+    if thrusting then
+      local size = 0.6 + math.random() * 0.9
+      pos.y = b.y + PACK_UP - 1.2 - i * 1.3
+      go.set_position(pos, id)
+      go.set_scale(size, id)
+      self.flames_shown = self.flames_shown + 1
+    end
+  end
+end
+
+local function update_pops(self, dt)
+  local pops = self.pops
+  for i = #pops, 1, -1 do
+    local pop = pops[i]
+    pop.age = pop.age + dt
+    local b = self.blobs[pop.cat]
+    if pop.age >= POP_SECONDS or b == nil or b.x == nil then
+      table.remove(pops, i)
+    else
+      pop.x, pop.y = camera_rig.to_screen(self.rig, b.x, b.y + LABEL_ABOVE + 4)
+    end
+  end
+  hud_model.pops = pops
+end
+
+local function surface_row(self, column)
+  local t = self.world.terrain
+  for row = 0, t.height - 1 do
+    if terrain.solid(t, column, row) then
+      return row
+    end
+  end
+  return t.height
+end
+
+local function update_target(self)
+  local column = controls.target(self.controls)
+  if controls.can_trigger(self.controls) then
+    hud_model.action = "boom"
+  else
+    hud_model.action = column and "strike" or nil
+  end
+  if column == nil then
+    hud_model.target = nil
+    return
+  end
+  local point = self.target_point
+  point.x, point.y =
+    camera_rig.to_screen(self.rig, column + 0.5, self.height - surface_row(self, column))
+  point.column = column
+  hud_model.target = point
+end
+
+local LIQUID_FRONT = voxel_mesh.DEPTH + 0.4
+
+local function lava_open(self)
+  return function(x)
+    return not terrain.solid(self.world.terrain, x, self.world.liquid.level - 1)
+  end
+end
+
+local function update_bubbles(self, dt)
+  bubbles.step(self.bubbles, dt, self.lava_open)
+  local cubes, shape, height = self.bubble_cubes, self.bubble_shape, self.height
+  for _, b in ipairs(self.bubbles.list) do
+    local id = cubes[b]
+    if id == nil then
+      id = cube(self, self.bubble_pos, colour(palette.BUBBLE, 0), 0.1)
+      cubes[b] = id
+    end
+    bubbles.shape(b, shape)
+    local swell = waves.surface(self.time, b.x, LIQUID_FRONT, -rules.OUT_MARGIN)
+    self.bubble_pos.x, self.bubble_pos.y = b.x, height - b.level + swell + shape.rise
+    go.set_position(self.bubble_pos, id)
+    go.set_scale(shape.size, id)
+  end
+  for b, id in pairs(cubes) do
+    if b.age >= b.life then
+      go.delete(id)
+      cubes[b] = nil
+    end
+  end
+end
+
+local CLOUD_DEPTH = -40
+local CLOUD_STRETCH = vmath.vector3(1.6, 1, 0.6)
+
+local function spawn_clouds(self)
+  self.clouds = clouds.new({ width = self.world.terrain.width, height = self.height })
+  self.cloud_ids, self.cloud_pos = {}, vmath.vector3(0, 0, CLOUD_DEPTH)
+  local tint = colour(self.look.clouds, 0)
+  for i, cloud in ipairs(self.clouds.list) do
+    local pos = vmath.vector3(cloud.x, cloud.y, CLOUD_DEPTH)
+    local lead
+    for _, part in ipairs(cloud.puffs) do
+      pos.x, pos.y = cloud.x + part.dx, cloud.y + part.dy
+      local id = cube(self, pos, tint, 1)
+      go.set_scale(CLOUD_STRETCH * part.size, id)
+      if lead then
+        go.set_parent(id, lead, true)
+      else
+        lead = id
+      end
+    end
+    self.cloud_ids[i] = lead
+  end
+end
+
+local function update_clouds(self, dt)
+  clouds.step(self.clouds, dt, self.world.wind)
+  local pos = self.cloud_pos
+  for i, cloud in ipairs(self.clouds.list) do
+    local lead = cloud.puffs[1]
+    pos.x, pos.y = cloud.x + lead.dx, cloud.y + lead.dy
+    go.set_position(pos, self.cloud_ids[i])
+  end
+end
+
+local function update_tide(self, dt)
+  local target = self.world.liquid.level
+  if self.liquid_shown == target then
+    return
+  end
+  self.liquid_shown = tide.step(self.liquid_shown, target, dt)
+  self.liquid_pos.y = self.liquid_start - self.liquid_shown
+  go.set_position(self.liquid_pos, "/liquid")
+  bubbles.set_level(self.bubbles, self.liquid_shown)
+  terrain_view.set_liquid(self.terrain, self.liquid_shown)
+end
+
+local function update_debris(self, dt)
+  local list, kept = self.debris, 0
+  for i = 1, #list do
+    local d = list[i]
+    d.life = d.life - dt
+    if d.life <= 0 then
+      go.delete(d.id)
+    else
+      d.vy = d.vy - DEBRIS_GRAVITY * dt
+      d.pos.x, d.pos.y = d.pos.x + d.vx * dt, d.pos.y + d.vy * dt
+      go.set_position(d.pos, d.id)
+      kept = kept + 1
+      list[kept] = d
+    end
+  end
+  for i = #list, kept + 1, -1 do
+    list[i] = nil
+  end
+end
+
+local function update_camera(self, dt)
+  local width, height = window.get_size()
+  if width ~= self.rig.screen.width or height ~= self.rig.screen.height then
+    camera_rig.resize(self.rig, width, height)
+  end
+  local w = self.world
+  local view = self.view
+  view.now, view.state = self.time, w.turn.state
+  view.projectile = self.focus_x and self.points.projectile or nil
+  if view.projectile then
+    view.projectile.x, view.projectile.y = self.focus_x, self.focus_y
+  end
+  view.thrown = nil
+  local fastest = 0
+  for _, c in ipairs(w.cats) do
+    local speed = math.abs(c.vx) + math.abs(c.vy)
+    local b = self.blobs[c.id]
+    if c.alive and (not c.grounded or c.vx ~= 0) and speed > fastest and b.x then
+      fastest, view.thrown = speed, b
+    end
+  end
+  local dead = self.blobs[director.dying(self.director)]
+  view.dead = dead and dead.x and dead or nil
+  local active = self.blobs[w.turn.cat]
+  view.active = active and active.x and active or nil
+  local crate = self.falling_crate
+  view.crate = crate and self.points.crate or nil
+  if crate then
+    view.crate.x, view.crate.y = crate.pos.x, crate.pos.y
+  end
+  local kind, tx, ty = director.target(self.director, view)
+  self.camera_kind = kind
+  if kind == "active" and self.glide_pending then
+    self.glide_pending = false
+    camera_rig.glide(self.rig)
+  end
+  if tx then
+    camera_rig.follow(self.rig, tx, ty)
+  end
+  camera_rig.update(self.rig, dt)
+  local shake = 0
+  if self.shake > 0 then
+    shake = self.shake * math.sin(self.time * 70) * 1.2
+    self.shake = math.max(0, self.shake - dt * 4)
+  end
+  local t = self.tremor
+  tremor.step(t, dt, self.time)
+  local peaks = self.quake_fx.peaks
+  if #peaks > 0 then
+    peaks[#peaks] = math.max(peaks[#peaks], math.abs(t.x), math.abs(t.y))
+  end
+  local eye = self.eye
+  eye.x, eye.y, eye.z = self.rig.x + shake + t.x, self.rig.y + t.y, self.rig.distance
+  go.set_position(eye, "/camera")
+end
+
+local function held_keys(self, dt)
+  local keys = self.keys
+  if keys.up then
+    controls.aim_key(self.controls, 1, dt)
+  end
+  if keys.down then
+    controls.aim_key(self.controls, -1, dt)
+  end
+  if keys.fire then
+    controls.charge(self.controls, dt)
+  end
+end
+
+local function update_controls(self, dt)
+  local w = self.world
+  local b = self.blobs[w.turn.cat]
+  local c = w.cats[w.turn.cat]
+  local me = self.authority.team()
+  local team = w.teams[me] or w.teams[w.turn.team]
+  local mine = w.turn.team == me and not self.pilots[me] and b ~= nil and c ~= nil and c.alive
+  local available, ammo = self.available, hud_model.ammo
+  for i = #available, 1, -1 do
+    available[i] = nil
+  end
+  if team then
+    for i, weapon in ipairs(weapons.list) do
+      ammo[weapon.id] = team.ammo[i]
+      if team.ammo[i] ~= 0 then
+        available[#available + 1] = weapon.id
+      end
+    end
+  end
+  local origin, scale = nil, hud_model.scale or 1
+  local cat, info = self.control_cat, self.control_info
+  cat.x, cat.y, cat.radius = -1e6, -1e6, 0
+  if b and b.x then
+    local sx, sy = camera_rig.to_screen(self.rig, b.x, b.y + BLOB_MIDDLE)
+    local ex = camera_rig.to_screen(self.rig, b.x + BLOB_RADIUS, b.y + BLOB_MIDDLE)
+    origin = self.aim_origin
+    origin.x, origin.y = sx, sy
+    cat.x, cat.y, cat.radius = sx / scale, sy / scale, math.abs(ex - sx) / scale
+  end
+  info.mine, info.state, info.cat = mine, w.turn.state, cat
+  info.facing, info.weapons = c and c.facing or 1, available
+  info.hanging = mine and c.hanging
+  info.jetting = mine and c.jet > 0
+  info.triggerable = nil
+  if mine and w.turn.state == "flight" and turn_rules.accepts(w, "fire") then
+    for _, p in ipairs(w.projectiles) do
+      if p.alive and weapons.get(p.weapon).trigger then
+        info.triggerable = p.weapon
+      end
+    end
+  end
+  controls.turn(self.controls, info)
+  held_keys(self, dt)
+  hud_model.mine = mine and (w.turn.state == "aiming" or w.turn.state == "retreat")
+  hud_model.hanging = info.hanging
+  hud_model.jetting = info.jetting
+  hud_model.weapons = available
+  hud_model.weapon = controls.current_weapon(self.controls)
+  hud_model.fuse = controls.fuse(self.controls)
+  hud_model.aim = controls.aim(self.controls)
+  hud_model.aim_origin = origin
+  hud_model.cancel = cat.radius
+  if not mine then
+    hud_model.grid = false
+  end
+end
+
+local function team_hp(w, team)
+  local total = 0
+  for _, id in ipairs(w.teams[team].cats) do
+    local c = w.cats[id]
+    if c.alive and c.hp > 0 then
+      total = total + c.hp
+    end
+  end
+  return total
+end
+
+local function update_info(self)
+  local w = self.world
+  local roster = self.playback.start.roster
+  local team = w.turn.team
+  if roster[team] then
+    local turn = self.turn_info
+    turn.team, turn.name = team, roster[team].team_name
+    hud_model.turn = turn
+  else
+    hud_model.turn = nil
+  end
+  for i = 1, #w.teams do
+    local line = hud_model.teams[i]
+    if line == nil then
+      line = { team = i, name = roster[i] and roster[i].team_name }
+      hud_model.teams[i] = line
+    end
+    line.hp = team_hp(w, i)
+    line.bot = self.pilots[i] == true
+  end
+  hud_model.seconds = turn_clock.seconds(w.turn)
+  hud_model.wind = w.wind
+  for _, c in ipairs(w.cats) do
+    local b = self.blobs[c.id]
+    local label = hud_model.labels[c.id]
+    if label == nil then
+      label = { name = roster[c.team].members[c.index], team = c.team }
+      hud_model.labels[c.id] = label
+    end
+    label.alive = c.alive
+    label.hp = math.max(0, c.hp)
+    label.gauge = c.gauge
+    label.fuel = c.jet > 0
+    if label.fuel then
+      label.gauge = math.floor(c.jet * rules.GAUGE / rules.JET_FUEL)
+    end
+    if b.x then
+      label.x, label.y = camera_rig.to_screen(self.rig, b.x, b.y + LABEL_ABOVE)
+    end
+  end
+  local active = hud_model.labels[w.turn.cat]
+  if active and active.alive and w.turn.state ~= "turn_end" then
+    hud_model.marker = active
+  else
+    hud_model.marker = nil
+  end
+end
+
+local function sim_view(self)
+  local w = self.world
+  local roster = self.playback.start.roster
+  local cats = {}
+  for i, c in ipairs(w.cats) do
+    cats[i] = {
+      team = c.team,
+      alive = c.alive,
+      hp = math.max(0, c.hp),
+      gauge = c.gauge,
+      hanging = c.hanging,
+      jet = c.jet,
+      anchor = c.hanging and { x = c.anchor_x, y = c.anchor_y } or nil,
+      rope = c.rope,
+      dig = c.dig,
+      x = c.x / FP,
+      y = c.y / FP,
+      grounded = c.grounded,
+      name = roster[c.team].members[c.index],
+      face = self.blobs[c.id] and self.blobs[c.id].face,
+    }
+  end
+  local playing = roster[w.turn.team]
+  return {
+    team = w.turn.team,
+    team_name = playing and playing.team_name,
+    cat = w.turn.cat,
+    seconds = turn_clock.seconds(w.turn),
+    wind = w.wind,
+    cats = cats,
+  }
+end
+
+local function crates_view(self)
+  local out = {}
+  for _, k in ipairs(self.world.crates) do
+    local view = self.crates[k.id]
+    if k.alive and view then
+      local sx, sy = camera_rig.to_screen(self.rig, view.pos.x, view.pos.y + 3)
+      out[#out + 1] = {
+        id = k.id,
+        x = math.floor(k.x / FP),
+        y = math.floor(k.y / FP),
+        chute = k.chute,
+        chute_shown = view.chute,
+        screen = { x = sx, y = sy },
+      }
+    end
+  end
+  return out
+end
+
+local function shots_view(self)
+  local out = {}
+  for _, p in ipairs(self.world.projectiles) do
+    local shot = self.shots[p.id]
+    if p.alive and shot then
+      local tint = go.get(msg.url(nil, shot.id, "body"), "tint")
+      local flying = 0
+      for _, spark in ipairs(shot.sparks and shot.sparks.list or {}) do
+        if shot.spark_cubes[spark] then
+          flying = flying + 1
+        end
+      end
+      local sx, sy = camera_rig.to_screen(self.rig, shot.pos.x, shot.pos.y + fuse.BASE / 2)
+      out[#out + 1] = {
+        weapon = p.weapon,
+        resting = p.resting,
+        fuse = p.fuse,
+        placed = shot.placed,
+        x = shot.pos.x,
+        z = shot.pos.z,
+        screen = { x = sx, y = sy },
+        tint = { tint.x, tint.y, tint.z },
+        stick = shot.stem_id ~= nil,
+        sparks = flying,
+        cubes_made = shot.cubes_made,
+      }
+    end
+  end
+  return out
+end
+
+local function arm_middle(self)
+  if self.arm_shown == 0 then
+    return nil
+  end
+  local p = self.arm_points[math.floor(self.arm_shown / 2) + 1]
+  local x, y = camera_rig.to_screen(self.rig, p.x, p.y)
+  return { x = x, y = y }
+end
+
+local function turns_played(w)
+  local total = 0
+  for _, team in ipairs(w.teams) do
+    total = total + team.turns
+  end
+  return total
+end
+
+local function publish(self)
+  if not testmode.enabled() then
+    return
+  end
+  local w = self.world
+  local active = w.cats[w.turn.cat]
+  local rebuild, frame = measures.summary(self.rebuild_ms), measures.summary(self.frame_ms)
+  testmode.put("game", {
+    tick = w.tick,
+    seed = self.playback.start.seed,
+    state = w.turn.state,
+    team = w.turn.team,
+    confirmed = self.playback.confirmed,
+    divergences = self.playback.divergences,
+    checked = self.playback.checked,
+    restored = self.playback.restored,
+    rejected = self.playback.rejected,
+    resync = self.playback.resync,
+    trace = self.trace and { checkpoints = self.trace.checkpoints, counts = self.trace.counts },
+    sim_ms = measures.summary(self.sim_ms),
+    authority_ms = measures.summary(self.authority_ms),
+    rebuild_ms = rebuild,
+    crater_s = measures.summary(self.crater_s),
+    quake = {
+      quakes = self.quake_fx.quakes,
+      shakes = self.quake_fx.shakes,
+      dust = self.quake_fx.dust,
+      dust_live = dust_live(self),
+      peaks = self.quake_fx.peaks,
+      cracks = #self.world.cracks,
+      checks = self.quake_fx.checks,
+      crack_s = measures.summary(self.crack_s),
+      crack_ms = measures.summary(self.crack_ms),
+      crack_frames = measures.summary(self.crack_frames),
+      part_ms = self.terrain.part_ms,
+      upload_ms = self.terrain.upload_ms,
+    },
+    flash_s = FLASH_SECONDS,
+    frame_ms = frame,
+    vertices = terrain_view.vertex_count(self.terrain),
+    biome = self.look == palette.BIOMES.volcano and "volcano" or "forest",
+    paint_ms = self.terrain.paint_ms,
+    bubbles = #self.bubbles.list,
+    liquid_shown = self.liquid_shown,
+    liquid_y = go.get_position("/liquid").y,
+    liquid_start = self.liquid_start,
+    fog_top = self.terrain.fog_band.x,
+    height = self.height,
+    width = self.world.terrain.width,
+    liquid = self.world.liquid.level,
+    clouds = #self.cloud_ids,
+    me = self.authority.team(),
+    kinds = self.kinds,
+    turns = turns_played(w),
+    pilots = self.pilots,
+    cat = active and { x = active.x / FP, y = active.y / FP, hp = active.hp } or nil,
+    hud = {
+      team = hud_model.turn and hud_model.turn.name,
+      seconds = hud_model.seconds,
+      wind = hud_model.wind,
+      teams = hud_model.teams,
+      labels = hud_model.labels,
+      shown = hud_model.shown,
+    },
+    blob = hud_model.aim_origin,
+    aim = hud_model.aim,
+    zoom = self.rig.distance,
+    camera = {
+      x = self.rig.x,
+      y = self.rig.y,
+      distance = self.rig.distance,
+      auto = self.rig.auto,
+      kind = self.camera_kind,
+    },
+    stick_objects = self.stick_objects,
+    shots = shots_view(self),
+    crates = crates_view(self),
+    planes = { flying = self.planes, flown = self.planes_flown },
+    picked = self.picked,
+    bit_colours = self.bit_colours,
+    waddlers = self.waddlers,
+    blinking = self.blinking,
+    flames = self.flames_shown,
+    target = hud_model.target and hud_model.target.column or nil,
+    weapon = hud_model.weapon,
+    fuse = hud_model.fuse,
+    grid = hud_model.grid,
+    cancel = hud_model.cancel,
+    sim = sim_view(self),
+    arm = {
+      mode = self.arm.mode,
+      shown = self.arm_shown,
+      cat = self.arm_cat,
+      tip = { x = self.arm.tip_x, y = self.arm.tip_y },
+      height = self.height,
+      mid = arm_middle(self),
+    },
+  })
+end
+
+local function follow_pilots(self, list, from)
+  local pilots = self.pilots
+  for i = #pilots, 1, -1 do
+    pilots[i] = nil
+  end
+  for i = 1, #self.world.teams do
+    pilots[i] = false
+  end
+  for _, entry in ipairs(list or {}) do
+    if from == "roster" and entry.kind == "bot" then
+      pilots[entry.team] = true
+    elseif from == "pilots" and pilots[entry] ~= nil then
+      pilots[entry] = true
+    end
+  end
+  self.pilots_changed = 2
+end
+
+local DIED = { type = "died" }
+
+local function revive(self, w)
+  local hanging = nil
+  for _, c in ipairs(w.cats) do
+    local b = self.blobs[c.id]
+    if b and not c.alive and not b.jelly.dead then
+      jelly.event(b.jelly, DIED)
+    elseif b and c.alive and b.jelly.dead then
+      b.jelly, b.grey, b.fall_y = jelly.new(c.id * 1.7), false, nil
+      go.set(b.body, "tint", colour(palette.TEAMS[c.team]))
+    end
+    if c.alive and c.hanging then
+      hanging = c
+    end
+  end
+  if hanging then
+    throw_arm(self, {
+      type = "tentacle_hooked",
+      cat = hanging.id,
+      x = hanging.anchor_x,
+      y = hanging.anchor_y,
+    })
+  elseif self.arm_cat then
+    arm.released(self.arm)
+  end
+end
+
+local function adopt(self, w)
+  self.world = w
+  terrain_view.destroy(self.terrain)
+  self.terrain =
+    terrain_view.new(w.terrain, { factory = msg.url("#chunk_factory"), liquid = w.liquid })
+  self.liquid_shown = w.liquid.level
+  self.liquid_pos.y = self.liquid_start - self.liquid_shown
+  go.set_position(self.liquid_pos, "/liquid")
+  bubbles.set_level(self.bubbles, self.liquid_shown)
+  terrain_view.set_liquid(self.terrain, self.liquid_shown)
+  revive(self, w)
+end
+
+local function resync(self)
+  local tick = self.playback.resync
+  if tick == nil or (self.resync_at and self.time - self.resync_at < RESYNC_SECONDS) then
+    return
+  end
+  self.resync_at = self.time
+  self.authority.send("snapshot_request", { tick = tick })
+end
+
+local function begin(self)
+  local w = self.playback.world
+  self.world = w
+  self.height = w.terrain.height
+  self.terrain =
+    terrain_view.new(w.terrain, { factory = msg.url("#chunk_factory"), liquid = w.liquid })
+  self.look = materials.look(w.liquid)
+  local sky = self.look.sky
+  msg.post("@render:", "clear_color", { color = vmath.vector4(sky[1], sky[2], sky[3], 1) })
+  self.bubbles = bubbles.new({
+    width = w.terrain.width,
+    level = w.liquid.level,
+    lava = w.liquid.kind == "lava",
+  })
+  self.lava_open, self.bubble_cubes = lava_open(self), {}
+  spawn_clouds(self)
+  self.liquid_start, self.liquid_shown = w.liquid.level, w.liquid.level
+  self.liquid_pos = vmath.vector3()
+  self.bubble_shape, self.bubble_pos = {}, vmath.vector3(0, 0, LIQUID_FRONT - 0.5)
+  build_liquid(self)
+  spawn_blobs(self)
+  spawn_arm(self)
+  local c = w.cats[w.turn.cat] or w.cats[1]
+  local x, y = world_xy(self, c.x, c.y)
+  local width, height = window.get_size()
+  self.rig = camera_rig.new({
+    map_width = w.terrain.width,
+    map_height = w.terrain.height,
+    screen = { width = width, height = height },
+    overview = not pointer.touch_device(),
+  })
+  camera_rig.place(self.rig, x, y)
+  go.set_rotation(vmath.quat_rotation_x(camera_rig.TILT), "/camera")
+  self.kinds = {}
+  for i, entry in ipairs(self.playback.start.roster) do
+    self.kinds[i] = entry.kind
+  end
+  self.controls = controls.new({ authority = self.authority })
+  self.router = touch_router.new({ rig = self.rig, controls = self.controls })
+  hud_model.touch_device = pointer.touch_device()
+  testmode.set("screen", "game")
+end
+
+function init(self)
+  hud_model.reset()
+  self.models = models.new()
+  self.moods = moods.new()
+  self.mood_fields = { world = nil, now = 0 }
+  if testmode.enabled() then
+    self.trace = trace.new()
+    self.mood_fields.onsets = {}
+  end
+  msg.post(".", "acquire_input_focus")
+  self.blobs, self.shots, self.seen_shots, self.debris = {}, {}, {}, {}
+  self.time, self.shake, self.published = 0, 0, 0
+  self.rebuild_ms, self.frame_ms = measures.new(), measures.new()
+  self.crater_s, self.sim_ms, self.authority_ms = measures.new(), measures.new(), measures.new()
+  self.crack_s, self.crack_ms, self.crack_frames = measures.new(), measures.new(), measures.new()
+  self.tremor = tremor.new()
+  self.quake_fx = { quakes = 0, shakes = 0, dust = 0, peaks = {}, opened = {}, checks = {} }
+  self.eye, self.wave = vmath.vector3(), vmath.vector4()
+  self.available, self.control_cat, self.control_info = {}, {}, {}
+  self.aim_origin, self.event, self.keys = {}, {}, {}
+  self.director = director.new()
+  self.director_fields = { now = 0, x = 0, y = 0 }
+  self.view = {}
+  self.points = { projectile = { x = 0, y = 0 }, crate = { x = 0, y = 0 } }
+  self.crates, self.seen_crates, self.pops, self.picked = {}, {}, {}, {}
+  self.planes, self.planes_flown, self.target_point = 0, 0, {}
+  self.bit_tints, self.bit_colours = {}, 0
+  self.waddlers, self.flames_shown = 0, 0
+  self.trail_pos = vmath.vector3()
+  self.spark_pos, self.spark_shape = vmath.vector3(), {}
+  self.spark_tints = { colour(palette.SPARKS[1]), colour(palette.SPARKS[2]) }
+  self.fuse_tint = colour(palette.FUSE)
+  self.stem_scale = vmath.vector3(FUSE_WIDTH, fuse.TIP - fuse.BASE, FUSE_WIDTH)
+  self.stick_objects = 0
+  self.smoke = colour(palette.SMOKE, 0)
+  self.frame_dt = 0
+  self.turn_info = {}
+  self.arm, self.arm_points, self.arm_parts, self.arm_shown = arm.new(), {}, {}, 0
+  self.arm_from = { x = 0, y = 0 }
+  self.pilots, self.pilots_changed = {}, 0
+end
+
+function final(self)
+  local sky = palette.SKY
+  msg.post("@render:", "clear_color", { color = vmath.vector4(sky[1], sky[2], sky[3], 1) })
+  if self.terrain then
+    terrain_view.destroy(self.terrain)
+  end
+  if self.liquid_path then
+    resource.release(self.liquid_path)
+  end
+  models.release(self.models)
+end
+
+function on_message(self, message_id)
+  if message_id == hash("start") then
+    self.authority = session.authority
+    self.playback = playback.new({
+      on_events = function(events, inputs)
+        on_events(self, events, inputs)
+      end,
+    })
+    self.authority.start()
+  end
+end
+
+function update(self, dt)
+  if self.authority == nil then
+    return
+  end
+  self.time = self.time + dt
+  measures.add(self.frame_ms, dt * 1000)
+  self.frame_dt = dt
+  local started = now()
+  self.authority.update(dt)
+  measures.add(self.authority_ms, (now() - started) * 1000)
+  for _, m in ipairs(self.authority.poll()) do
+    self.playback.receive(m)
+    if m.name == "game_start" and self.world == nil then
+      begin(self)
+      follow_pilots(self, m.data.roster, "roster")
+    elseif m.name == "pilots" then
+      follow_pilots(self, m.data.bots, "pilots")
+    end
+  end
+  if self.world == nil then
+    return
+  end
+  if self.playback.world ~= self.world then
+    adopt(self, self.playback.world)
+  end
+  resync(self)
+  self.focus_x, self.focus_y = nil, nil
+  local before_tick = self.world.tick
+  started = now()
+  local alpha = self.playback.advance(dt)
+  local stepped = self.world.tick - before_tick
+  if stepped > 0 then
+    measures.add(self.sim_ms, (now() - started) * 1000 / stepped)
+  end
+  local rebuilt = terrain_view.rebuild(self.terrain, REBUILD_LIMIT_MS)
+  if rebuilt then
+    measures.add(self.rebuild_ms, rebuilt)
+    if self.terrain.kind == "crack" then
+      measures.add(self.crack_ms, rebuilt)
+    end
+  end
+  local finished, kind, slices = terrain_view.finished(self.terrain)
+  if finished and kind == "crack" then
+    measures.add(self.crack_s, finished)
+    measures.add(self.crack_frames, slices)
+    check_cracks(self)
+  elseif finished then
+    measures.add(self.crater_s, finished)
+  end
+  update_blobs(self, dt, alpha)
+  update_shots(self, alpha)
+  update_crates(self, alpha)
+  update_jet(self)
+  update_debris(self, dt)
+  update_tide(self, dt)
+  update_bubbles(self, dt)
+  update_clouds(self, dt)
+  update_arm(self, dt)
+  update_camera(self, dt)
+  update_controls(self, dt)
+  update_pops(self, dt)
+  update_target(self)
+  update_info(self)
+  self.wave.x = self.time
+  go.set("/liquid#mesh", "wave", self.wave)
+  local moment = self.world.turn.state .. self.world.turn.team
+  local aiming = self.world.turn.state == "aiming" and self.world.turn.team == self.authority.team()
+  if
+    self.time - self.published >= 1
+    or moment ~= self.moment
+    or aiming
+    or self.faces_changed
+    or self.quake_fx.changed
+    or self.pilots_changed > 0
+  then
+    self.published, self.moment, self.faces_changed = self.time, moment, false
+    self.quake_fx.changed = false
+    self.pilots_changed = math.max(0, self.pilots_changed - 1)
+    publish(self)
+  end
+  if self.playback.result and self.over_at == nil then
+    self.over_at = self.time + director.HOLD_SECONDS
+  end
+  if self.over_at and self.time >= self.over_at and not self.over then
+    self.over = true
+    publish(self)
+    local result = self.playback.result
+    local teams = {}
+    for i, entry in ipairs(self.playback.start.roster) do
+      teams[i] = entry.team_name
+    end
+    msg.post(
+      "main:/app#app",
+      "game_over",
+      { winner = result.winner, stats = result.stats, teams = teams }
+    )
+  end
+end
+
+local KEY_NAMES = keymap.actions(hash)
+local WALKS = { left = "left", right = "right" }
+local AIMS = { aim_up = "up", aim_down = "down", fire = "fire" }
+local CLIMBS = { aim_up = "climb_up", aim_down = "climb_down" }
+local WEAPON_SLOT = {}
+for i = 1, #weapons.list do
+  WEAPON_SLOT["weapon_" .. i] = i
+end
+
+local function on_command(self, command, action)
+  if WALKS[command] and (action.pressed or action.released) then
+    touch_router.key_walk(self.router, { name = WALKS[command], down = action.pressed })
+  elseif AIMS[command] and (action.pressed or action.released) then
+    self.keys[AIMS[command]] = action.pressed or nil
+    if CLIMBS[command] then
+      touch_router.key_climb(self.router, { name = CLIMBS[command], down = action.pressed })
+    end
+    if command == "fire" and action.released then
+      controls.release_charge(self.controls)
+    end
+  elseif command == "jump" and action.pressed then
+    controls.jump(self.controls)
+  elseif command == "fuse" and action.pressed then
+    controls.next_fuse(self.controls)
+  elseif WEAPON_SLOT[command] and action.pressed then
+    local weapon = weapons.list[WEAPON_SLOT[command]]
+    if weapon then
+      controls.weapon(self.controls, weapon.id)
+    end
+  end
+end
+
+function on_input(self, action_id, action)
+  if self.router == nil then
+    return false
+  end
+  local list = pointer.from(action_id, action)
+  if list then
+    local e = self.event
+    for _, p in ipairs(list) do
+      e.id, e.x, e.y, e.now = p.id, p.screen_x, p.screen_y, self.time
+      e.mouse = p.mouse == true
+      if p.pressed then
+        e.state = "pressed"
+        touch_router.pointer(self.router, e)
+      end
+      e.state = p.released and "released" or "moved"
+      if not p.pressed or p.released then
+        touch_router.pointer(self.router, e)
+      end
+    end
+    return true
+  end
+  local key = KEY_NAMES[action_id]
+  if key then
+    local command = keymap.command(session.keys, key)
+    if command then
+      on_command(self, command, action)
+    end
+  elseif action_id == hash("zoom_in") and action.pressed then
+    camera_rig.pinch(self.rig, WHEEL_ZOOM)
+  elseif action_id == hash("zoom_out") and action.pressed then
+    camera_rig.pinch(self.rig, 1 / WHEEL_ZOOM)
+  elseif action_id == hash("pan") then
+    if action.pressed then
+      self.dragging = { x = action.screen_x, y = action.screen_y }
+    elseif self.dragging then
+      local d = self.dragging
+      camera_rig.pan(
+        self.rig,
+        { x = d.x, y = d.y, dx = action.screen_x - d.x, dy = action.screen_y - d.y }
+      )
+      d.x, d.y = action.screen_x, action.screen_y
+      if action.released then
+        self.dragging = nil
+      end
+    end
+  end
+  return false
+end

@@ -1,0 +1,9 @@
+{$DOMAIN} {
+	@nakama path /v2/* /ws /healthcheck
+	handle @nakama {
+		reverse_proxy blobattle-nakama:7350
+	}
+	handle {
+		reverse_proxy blobattle-web:80
+	}
+}

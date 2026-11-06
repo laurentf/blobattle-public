@@ -1,0 +1,440 @@
+local backdrop = require("render.backdrop")
+local buffers = require("render.buffers")
+local faces = require("render.faces")
+local i18n = require("ui.i18n")
+local jelly = require("render.jelly")
+local measures = require("game.measures")
+local palette = require("ui.palette")
+local paths = require("render.paths")
+local scene = require("menu.scene")
+local shapes = require("render.shapes")
+local testmode = require("ui.testmode")
+local voxel_font = require("render.voxel_font")
+local voxel_mesh = require("render.voxel_mesh")
+
+local SEED = 20260924
+local LOOK = backdrop.MEADOW
+local SLOPE = math.tan(LOOK.camera.fov / 2)
+local PAN_RATE = 0.05
+local BLOB_Z = -4
+local BLOB_HALF = 3.5
+local FACE_Y = 4.5
+local TITLE_Z = 12
+local TITLE_DEPTH = 3
+local TITLE_CELL = 1.9
+local TITLE_HEIGHT = 0.72
+local TITLE_BOB_SECONDS = 1.4
+local HOP_SPEED, GRAVITY = 38, 110
+local SHAKE = 30
+local SHELL_START = { x = 90, y = 50 }
+local FLASH_SECONDS = 0.3
+
+local function colour(rgb, alpha)
+  return vmath.vector4(rgb[1], rgb[2], rgb[3], alpha or 1)
+end
+
+local function mesh(self, part)
+  local path = paths.next("menu")
+  local res = resource.create_buffer(path, { buffer = buffers.seal(part).buf })
+  self.resources[#self.resources + 1] = path
+  return res, part.n
+end
+
+local function drawn(self, res, n)
+  self.vertices = self.vertices + n
+  return res
+end
+
+local function piece(fields)
+  local id = factory.create("#piece_factory", fields.pos, nil, nil, fields.scale or 1)
+  local url = msg.url(nil, id, "mesh")
+  go.set(url, "vertices", fields.res)
+  go.set(url, "tint", colour(fields.tint, fields.shine or 0))
+  return id, url
+end
+
+local function build_layers(self)
+  self.layers = backdrop.layers(SEED, LOOK)
+  for _, layer in ipairs(self.layers) do
+    local fields = { cell = 1, depth = layer.thickness }
+    local pos =
+      vmath.vector3(layer.x0 + layer.cell / 2, 0, layer.depth - layer.thickness * layer.cell / 2)
+    local body = layer.heights
+    if layer.rim then
+      body = {}
+      for i, h in ipairs(layer.heights) do
+        body[i] = h - 1
+      end
+    end
+    piece({
+      res = drawn(self, mesh(self, shapes.skyline(body, fields))),
+      pos = pos,
+      scale = layer.cell,
+      tint = layer.colour,
+    })
+    if layer.rim then
+      fields.band = 1
+      piece({
+        res = drawn(self, mesh(self, shapes.skyline(layer.heights, fields))),
+        pos = pos,
+        scale = layer.cell,
+        tint = layer.rim,
+      })
+    end
+  end
+  self.ground = self.layers[#self.layers]
+end
+
+local function build_water(self)
+  local part = backdrop.water(self.ground, LOOK)
+  local id = factory.create("#liquid_factory", vmath.vector3(0, 0, 3 - voxel_mesh.DEPTH - 0.4))
+  self.water = msg.url(nil, id, "mesh")
+  go.set(self.water, "vertices", drawn(self, mesh(self, part)))
+  go.set(self.water, "tint", colour(LOOK.water.colour))
+  self.wave = vmath.vector4()
+end
+
+local function drift(self, cloud, from)
+  local half = self.cloud_span / 2
+  go.set(cloud.id, "position.x", from)
+  go.animate(
+    cloud.id,
+    "position.x",
+    go.PLAYBACK_ONCE_FORWARD,
+    half,
+    go.EASING_LINEAR,
+    (half - from) / cloud.speed,
+    0,
+    function()
+      drift(self, cloud, -half)
+    end
+  )
+end
+
+local function build_clouds(self)
+  local spec = LOOK.clouds
+  self.cloud_span = LOOK.width * (LOOK.view - spec.depth) / LOOK.view + 40
+  self.clouds = {}
+  for i, c in ipairs(backdrop.clouds(SEED, LOOK)) do
+    local pos = vmath.vector3(c.x, c.y, c.depth)
+    local id = piece({
+      res = drawn(self, mesh(self, shapes.extrude(c.cells, { depth = 3 }))),
+      pos = pos,
+      scale = c.size,
+      tint = spec.colour,
+      shine = 1,
+    })
+    self.clouds[i] = { id = id, speed = c.speed }
+    drift(self, self.clouds[i], c.x)
+  end
+end
+
+local function build_blobs(self)
+  self.faces = {}
+  local face_n = 0
+  for _, name in ipairs(faces.NAMES) do
+    local res, n = mesh(self, shapes.face(faces[name]))
+    self.faces[name], face_n = res, math.max(face_n, n)
+  end
+  local body, body_n = mesh(self, shapes.blob())
+  local placed = {}
+  self.blobs = {}
+  for i, x in ipairs(LOOK.blobs) do
+    self.vertices = self.vertices + body_n + face_n
+    local ground = backdrop.ground(self.ground, x, BLOB_HALF)
+    local pos = vmath.vector3(x, ground, BLOB_Z)
+    local id = factory.create("#blob_factory", pos)
+    go.set_rotation(vmath.quat_rotation_y((math.random() - 0.5) * 0.6), id)
+    local b = {
+      id = id,
+      body = msg.url(nil, id, "body"),
+      eyes = msg.url(nil, id, "eyes"),
+      ground = ground,
+      pos = pos,
+      vy = 0,
+      jelly = jelly.new(i * 1.7),
+      shape = {},
+      motion = { vx = 0, vy = 0, walk = 0 },
+      squash = vmath.vector4(1, 1, 0, 0),
+      wobble = vmath.vector4(),
+      face = "calm",
+      screen = { x = 0, y = 0 },
+    }
+    go.set(b.body, "vertices", body)
+    go.set(b.eyes, "vertices", self.faces.calm)
+    go.set(b.body, "tint", colour(palette.TEAMS[i]))
+    go.set(b.eyes, "tint", colour(palette.EYES, 0))
+    self.blobs[i] = b
+    placed[i] = { x = x }
+  end
+  self.scene = scene.new({
+    blobs = placed,
+    random = function(lo, hi)
+      return lo + (hi - lo) * math.random()
+    end,
+  })
+end
+
+local function build_title(self)
+  local line = voxel_font.layout(i18n.t("app.title"):upper())
+  self.title = { width = line.width, letters = {}, shown = true, left = 0, right = 0 }
+  for i, letter in ipairs(line.letters) do
+    local cells = {}
+    for k, c in ipairs(letter.cells) do
+      cells[k] = { x = c.x - 2, y = c.y }
+    end
+    local pos = vmath.vector3()
+    local id, url = piece({
+      res = drawn(self, mesh(self, shapes.extrude(cells, { depth = TITLE_DEPTH }))),
+      pos = pos,
+      tint = palette.TEAMS[(i - 1) % #palette.TEAMS + 1],
+      shine = 1,
+    })
+    go.set_parent(id, "/camera")
+    self.title.letters[i] = { id = id, url = url, x = letter.x + 2, pos = pos }
+  end
+end
+
+function init(self)
+  self.resources, self.vertices = {}, 0
+  self.time, self.cost = 0, measures.new()
+  self.eye = vmath.vector3(0, LOOK.camera.ground_line, LOOK.view)
+  self.shells, self.debris = {}, {}
+  self.booms = 0
+  local cube, cube_n = mesh(self, shapes.cube())
+  self.cube = cube
+  self.vertices = self.vertices + backdrop.CUBES * cube_n
+  build_layers(self)
+  build_water(self)
+  build_clouds(self)
+  build_blobs(self)
+  build_title(self)
+end
+
+function final(self)
+  for _, path in ipairs(self.resources) do
+    resource.release(path)
+  end
+end
+
+local function explode(self, x)
+  self.booms = self.booms + 1
+  local centre = vmath.vector3(x, backdrop.ground(self.ground, x) + 1, BLOB_Z)
+  local flash = factory.create("#cube_factory", centre, nil, nil, 3)
+  go.set(msg.url(nil, flash, "body"), "vertices", self.cube)
+  go.set(msg.url(nil, flash, "body"), "tint", colour(palette.FLASH, 0))
+  go.animate(
+    flash,
+    "scale",
+    go.PLAYBACK_ONCE_FORWARD,
+    vmath.vector3(24),
+    go.EASING_OUTQUAD,
+    FLASH_SECONDS,
+    0,
+    function()
+      go.delete(flash)
+    end
+  )
+  for k = 1, backdrop.DEBRIS do
+    local a = math.random() * math.pi
+    local speed = 25 + math.random() * 40
+    local id = factory.create("#cube_factory", centre, nil, nil, 0.8 + math.random() * 0.8)
+    local body = msg.url(nil, id, "body")
+    go.set(body, "vertices", self.cube)
+    go.set(body, "tint", colour(palette.DEBRIS[k % #palette.DEBRIS + 1], 0))
+    self.debris[#self.debris + 1] = {
+      id = id,
+      pos = vmath.vector3(centre),
+      vx = math.cos(a) * speed,
+      vy = math.sin(a) * speed,
+      life = 0.9 + math.random() * 0.4,
+    }
+  end
+end
+
+local function launch(self, e)
+  local ground = backdrop.ground(self.ground, e.to)
+  local from = vmath.vector3(e.to - e.side * SHELL_START.x, self.eye.y + SHELL_START.y, BLOB_Z)
+  local id = factory.create("#cube_factory", from, nil, nil, 2)
+  local body = msg.url(nil, id, "body")
+  go.set(body, "vertices", self.cube)
+  go.set(body, "tint", colour(palette.SHOTS.bazooka))
+  self.shells[#self.shells + 1] = {
+    id = id,
+    from = from,
+    to = vmath.vector3(e.to, ground + 1, BLOB_Z),
+    t = 0,
+    flight = e.flight,
+    pos = vmath.vector3(from),
+  }
+end
+
+local function update_shells(self, dt)
+  for i = #self.shells, 1, -1 do
+    local s = self.shells[i]
+    s.t = s.t + dt
+    local k = math.min(1, s.t / s.flight)
+    s.pos.x = s.from.x + (s.to.x - s.from.x) * k
+    s.pos.y = s.from.y + (s.to.y - s.from.y) * k + 30 * k * (1 - k)
+    go.set_position(s.pos, s.id)
+    if k >= 1 then
+      go.delete(s.id)
+      table.remove(self.shells, i)
+    end
+  end
+  for i = #self.debris, 1, -1 do
+    local d = self.debris[i]
+    d.life = d.life - dt
+    d.vy = d.vy - GRAVITY * dt
+    d.pos.x, d.pos.y = d.pos.x + d.vx * dt, d.pos.y + d.vy * dt
+    go.set_position(d.pos, d.id)
+    if d.life <= 0 then
+      go.delete(d.id)
+      table.remove(self.debris, i)
+    end
+  end
+end
+
+local function update_blobs(self, dt)
+  for i, b in ipairs(self.blobs) do
+    local state = self.scene.blobs[i]
+    if state.hop then
+      state.hop = nil
+      if b.vy == 0 and b.pos.y <= b.ground then
+        b.vy = HOP_SPEED
+        jelly.event(b.jelly, { type = "fired" })
+      end
+    end
+    if state.shake then
+      state.shake = nil
+      jelly.event(b.jelly, { type = "damaged", amount = SHAKE })
+    end
+    if b.vy ~= 0 or b.pos.y > b.ground then
+      b.vy = b.vy - GRAVITY * dt
+      b.pos.y = b.pos.y + b.vy * dt
+      if b.pos.y <= b.ground then
+        b.pos.y, b.vy = b.ground, 0
+        jelly.event(b.jelly, { type = "landed" })
+      end
+      go.set_position(b.pos, b.id)
+    end
+    if state.mood ~= b.face then
+      b.face = state.mood
+      go.set(b.eyes, "vertices", self.faces[b.face])
+    end
+    b.motion.vy = b.vy
+    jelly.step(b.jelly, dt, b.motion)
+    local s = jelly.shape(b.jelly, b.shape)
+    b.squash.x, b.squash.y, b.squash.z = s.sx, s.sy, -s.lean
+    b.wobble.x, b.wobble.y = s.wobble, s.phase
+    go.set(b.body, "squash", b.squash)
+    go.set(b.eyes, "squash", b.squash)
+    go.set(b.body, "wobble", b.wobble)
+    go.set(b.eyes, "wobble", b.wobble)
+  end
+end
+
+local function to_screen(self, x, y, z, out)
+  local d = SLOPE * (self.eye.z - z)
+  out.x = 0.5 + (x - self.eye.x) / (d * self.aspect) / 2
+  out.y = 0.5 + (y - self.eye.y) / d / 2
+  return out
+end
+
+local function lay_title(self, half_w, half_h)
+  local title = self.title
+  local cell = math.min(TITLE_CELL, 1.7 * half_w / title.width)
+  local y = half_h * TITLE_HEIGHT - 3.5 * cell
+  local left = -title.width * cell / 2
+  title.left = 0.5 + (left - cell / 2) / half_w / 2
+  title.right = 0.5 + (left + (title.width - 0.5) * cell) / half_w / 2
+  for i, l in ipairs(title.letters) do
+    go.cancel_animations(l.id)
+    l.pos.x, l.pos.y, l.pos.z = left + l.x * cell, y, TITLE_Z - self.eye.z
+    go.set_position(l.pos, l.id)
+    go.set_scale(cell, l.id)
+    local delay = (i - 1) * 0.12
+    go.animate(
+      l.id,
+      "position.y",
+      go.PLAYBACK_LOOP_PINGPONG,
+      y + 0.35 * cell,
+      go.EASING_INOUTSINE,
+      TITLE_BOB_SECONDS,
+      delay
+    )
+    go.animate(
+      l.id,
+      "scale.y",
+      go.PLAYBACK_LOOP_PINGPONG,
+      cell * 1.06,
+      go.EASING_INOUTSINE,
+      TITLE_BOB_SECONDS / 2,
+      delay
+    )
+  end
+end
+
+local function update_camera(self)
+  local width, height = window.get_size()
+  if width ~= self.width or height ~= self.height then
+    self.width, self.height, self.aspect = width, height, width / height
+    local eye = backdrop.eye(LOOK, self.aspect)
+    self.eye.z, self.eye.y = eye.z, eye.y
+    local half_h = SLOPE * (self.eye.z - TITLE_Z)
+    lay_title(self, half_h * self.aspect, half_h)
+  end
+  self.eye.x = math.sin(self.time * PAN_RATE) * LOOK.camera.pan
+  go.set_position(self.eye, "/camera")
+end
+
+local function publish(self)
+  if not testmode.enabled() then
+    return
+  end
+  local moods, faces_at = {}, {}
+  for i, b in ipairs(self.blobs) do
+    moods[i] = b.face
+    faces_at[i] = to_screen(self, b.pos.x, b.pos.y + FACE_Y, b.pos.z, b.screen)
+  end
+  testmode.put("backdrop", {
+    title = self.title.shown and #self.title.letters or 0,
+    title_span = { self.title.left, self.title.right },
+    moods = moods,
+    faces = faces_at,
+    booms = self.booms,
+    ms = measures.summary(self.cost),
+    vertices = self.vertices,
+  })
+end
+
+function update(self, dt)
+  local started = os.clock()
+  self.time = self.time + dt
+  for _, e in ipairs(scene.update(self.scene, dt)) do
+    if e.type == "shell" then
+      launch(self, e)
+    elseif e.type == "boom" then
+      explode(self, e.x)
+    end
+  end
+  update_shells(self, dt)
+  update_blobs(self, dt)
+  update_camera(self)
+  self.wave.x = self.time
+  go.set(self.water, "wave", self.wave)
+  measures.add(self.cost, (os.clock() - started) * 1000)
+  if self.time - (self.published or 0) >= 0.5 then
+    self.published = self.time
+    publish(self)
+  end
+end
+
+function on_message(self, message_id, message)
+  if message_id == hash("title") then
+    self.title.shown = message.show
+    for _, l in ipairs(self.title.letters) do
+      msg.post(l.id, message.show and "enable" or "disable")
+    end
+  end
+end

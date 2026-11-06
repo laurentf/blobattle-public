@@ -1,0 +1,17 @@
+name: "main"
+instances {
+  id: "camera"
+  prototype: "/main/camera.go"
+  position {
+    z: 150.0
+  }
+}
+instances {
+  id: "world"
+  prototype: "/main/world.go"
+}
+instances {
+  id: "liquid"
+  prototype: "/main/liquid.go"
+}
+scale_along_z: 0

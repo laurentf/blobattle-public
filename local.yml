@@ -1,0 +1,10 @@
+name: blobattle1
+logger:
+  level: INFO
+console:
+  username: admin
+session:
+  token_expiry_sec: 7200
+  single_socket: true
+runtime:
+  path: /nakama/data/modules

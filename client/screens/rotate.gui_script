@@ -1,0 +1,24 @@
+local i18n = require("ui.i18n")
+local palette = require("ui.palette")
+local widgets = require("ui.widgets")
+
+local VEIL_ALPHA = 0.94
+
+local function refresh(self)
+  gui.set_color(gui.get_node("veil"), widgets.colour(palette.INK, VEIL_ALPHA))
+  gui.set_color(gui.get_node("phone"), widgets.colour(palette.BUTTON))
+  widgets.text("message", i18n.t("rotate.message"))
+  widgets.fit(self, { "phone", "message" })
+end
+
+function init(self)
+  gui.set_render_order(15)
+  refresh(self)
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  end
+end

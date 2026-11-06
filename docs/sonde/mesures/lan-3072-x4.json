@@ -1,0 +1,93 @@
+{
+ "done": true,
+ "elapsed_ms": 9994,
+ "spikeResults": null,
+ "spikeNet": {
+  "probe_match": true,
+  "socket": true,
+  "last_tick": 30,
+  "server_grid": {
+   "lookup_solid": 43490,
+   "lookup_ns": 1300.6286400002,
+   "grid_build_ms": 1314.018872,
+   "w": 3072,
+   "heights_ms": 14.292984000008,
+   "h": 1536,
+   "grid_chk_after": "1082896651",
+   "grid_chk_before": "2983530908",
+   "grid_carve_avg_ms": 0.38683386000002
+  },
+  "client_probe": {
+   "bit_raw_lshift": "-16",
+   "trig": "1320161057",
+   "float_xy": "366.37162720384015,0.10303205256324084",
+   "bench200k_ms": 221.99988365173,
+   "bench200k": "3181660144",
+   "xorshift": "3786880798",
+   "has_bit32": false,
+   "version": "Lua 5.1",
+   "has_bit": true,
+   "float": "1115105457",
+   "fixed": "1612344986",
+   "jit": false,
+   "trig_sum": "6231.5269888193161"
+  },
+  "user_id": "6705d51e-d9ea-4a49-b1f8-41069c61728a",
+  "client_grid": {
+   "lookup_solid": 21692,
+   "lookup_ns": 1180.0050735474,
+   "grid_build_ms": 878.99994850159,
+   "w": 3072,
+   "heights_ms": 6.0000419616699,
+   "h": 1536,
+   "grid_chk_after": "1082896651",
+   "grid_chk_before": "2983530908",
+   "grid_carve_avg_ms": 0.27999877929688
+  },
+  "grid_match": true,
+  "ticks": 4,
+  "echoes": 4,
+  "last_rtt_ms": 99.999904632568,
+  "match_id": "7f391693-7161-4341-b310-563393a4db3b.spike1",
+  "server_probe": {
+   "bit_raw_lshift": "4294967280",
+   "trig": "1320161057",
+   "float_xy": "366.37162720384015,0.10303205256324084",
+   "bench1m_ms": 2577.201736,
+   "xorshift": "3786880798",
+   "version": "Lua 5.1",
+   "fixed": "1612344986",
+   "has_bit32": true,
+   "jit": false,
+   "float": "1115105457",
+   "bench1m": "3124260176",
+   "has_bit": false,
+   "trig_sum": "6231.5269888193152"
+  },
+  "auth": true
+ },
+ "spikeProbe": {
+  "bit_raw_lshift": "-16",
+  "trig": "1320161057",
+  "float_xy": "366.37162720384015,0.10303205256324084",
+  "bench200k_ms": 221.99988365173,
+  "bench200k": "3181660144",
+  "xorshift": "3786880798",
+  "has_bit32": false,
+  "version": "Lua 5.1",
+  "has_bit": true,
+  "float": "1115105457",
+  "fixed": "1612344986",
+  "jit": false,
+  "trig_sum": "6231.5269888193161"
+ },
+ "stats": "PROBE MATCH fixed=1612344986 float=1115105457 trig=1320161057 xorshift=3786880798\nconnecting to 192.168.0.21:7650\nauth ok user 6705d51e (704ms)\nsocket connected\njoined match 7f391693-7161...\nmap 3072x1536 gen 541ms tex 48ms | opengl 3.0 max_tex 8192 | clock-gran 0.100ms\ntap (1819,192) mode sub: carve 4.10ms upload 1.20ms\nframe avg 16.6ms max 18.0ms (60 fps) lua 753 KB\nGRID MATCH grid_chk_before=2983530908 grid_chk_after=1082896651 (server carve 0.39ms lookup 1301ns)\necho recv 4/4 rtt 100.0ms\nserver ticks recv 4 (tick 30, players 1)",
+ "webgl": "844 | 390 | WebGL 2.0 (OpenGL ES 3.0 Chromium) | ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver) | 8192",
+ "logs": [
+  "[log.error] Failed to load resource: the server responded with a status of 404 (Not Found) http://192.168.0.21:8093/favicon.ico",
+  "[console.log] Running...",
+  "[console.log] ",
+  "[console.log] %c    %c    Made with Defold    %c    %c    https://www.defold.com background: #fd6623; padding:5px 0; border: 5px; background: #272c31; color: #fafafa; padding:5px 0; background: #39a3e4; padding:5px 0; background: #ffffff; color: #000000; padding:5px 0;",
+  "[log.warning] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio http://192.168.0.21:8093/spikedefold_wasm.js"
+ ]
+}

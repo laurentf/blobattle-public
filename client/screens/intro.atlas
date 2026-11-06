@@ -1,0 +1,9 @@
+images {
+  image: "/brand/intro_studio.png"
+}
+images {
+  image: "/brand/intro_logo.png"
+}
+margin: 0
+extrude_borders: 2
+inner_padding: 0

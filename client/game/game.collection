@@ -1,0 +1,21 @@
+name: "game"
+instances {
+  id: "camera"
+  prototype: "/game/camera.go"
+  position {
+    z: 160.0
+  }
+}
+instances {
+  id: "world"
+  prototype: "/game/world.go"
+}
+instances {
+  id: "liquid"
+  prototype: "/game/liquid.go"
+}
+instances {
+  id: "hud"
+  prototype: "/game/hud.go"
+}
+scale_along_z: 0

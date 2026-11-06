@@ -1,0 +1,173 @@
+script: "/screens/intro.gui_script"
+textures {
+  name: "intro"
+  texture: "/screens/intro.atlas"
+}
+background_color {
+  x: 0.0
+  y: 0.0
+  z: 0.0
+  w: 0.0
+}
+nodes {
+  position {
+    x: 422.0
+    y: 195.0
+    z: 0.0
+    w: 1.0
+  }
+  rotation {
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0
+  }
+  scale {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  size {
+    x: 4000.0
+    y: 4000.0
+    z: 0.0
+    w: 1.0
+  }
+  color {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  type: TYPE_BOX
+  blend_mode: BLEND_MODE_ALPHA
+  texture: ""
+  id: "cover"
+  adjust_mode: ADJUST_MODE_STRETCH
+  alpha: 1.0
+  inherit_alpha: true
+  size_mode: SIZE_MODE_MANUAL
+}
+nodes {
+  position {
+    x: 422.0
+    y: 195.0
+    z: 0.0
+    w: 1.0
+  }
+  rotation {
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0
+  }
+  scale {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  size {
+    x: 320.0
+    y: 320.0
+    z: 0.0
+    w: 1.0
+  }
+  color {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  type: TYPE_BOX
+  blend_mode: BLEND_MODE_ALPHA
+  texture: "intro/intro_studio"
+  id: "studio"
+  adjust_mode: ADJUST_MODE_FIT
+  alpha: 1.0
+  inherit_alpha: true
+  size_mode: SIZE_MODE_MANUAL
+}
+nodes {
+  position {
+    x: 422.0
+    y: 195.0
+    z: 0.0
+    w: 1.0
+  }
+  rotation {
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0
+  }
+  scale {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  size {
+    x: 300.0
+    y: 300.0
+    z: 0.0
+    w: 1.0
+  }
+  color {
+    x: 1.0
+    y: 1.0
+    z: 1.0
+    w: 1.0
+  }
+  type: TYPE_BOX
+  blend_mode: BLEND_MODE_ALPHA
+  texture: "intro/intro_logo"
+  id: "logo"
+  adjust_mode: ADJUST_MODE_FIT
+  alpha: 1.0
+  inherit_alpha: true
+  size_mode: SIZE_MODE_MANUAL
+}
+layouts {
+  name: "Landscape"
+}
+layouts {
+  name: "Portrait"
+  nodes {
+    position {
+      x: 195.0
+      y: 422.0
+      z: 0.0
+      w: 1.0
+    }
+    type: TYPE_BOX
+    id: "cover"
+    overridden_fields: 1
+  }
+  nodes {
+    position {
+      x: 195.0
+      y: 422.0
+      z: 0.0
+      w: 1.0
+    }
+    type: TYPE_BOX
+    id: "studio"
+    overridden_fields: 1
+  }
+  nodes {
+    position {
+      x: 195.0
+      y: 422.0
+      z: 0.0
+      w: 1.0
+    }
+    type: TYPE_BOX
+    id: "logo"
+    overridden_fields: 1
+  }
+}
+material: "/builtins/materials/gui.material"
+adjust_reference: ADJUST_REFERENCE_PARENT
+max_nodes: 16

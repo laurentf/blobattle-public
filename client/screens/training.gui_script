@@ -1,0 +1,125 @@
+local i18n = require("ui.i18n")
+local rules = require("shared.sim.rules")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local STEPPERS = { teams = "teams", cats = "cats_per_team" }
+local CYCLES = {
+  bots = { setting = "bot_level", prefix = "level." },
+  map = { setting = "map", prefix = "map." },
+}
+local FIT = {
+  "title",
+  "teams_label",
+  "teams_minus",
+  "teams_value",
+  "teams_plus",
+  "cats_label",
+  "cats_minus",
+  "cats_value",
+  "cats_plus",
+  "bots_label",
+  "bots_cycle",
+  "map_label",
+  "map_cycle",
+  "back",
+  "launch",
+}
+local BUTTONS = {
+  "teams_minus",
+  "teams_plus",
+  "cats_minus",
+  "cats_plus",
+  "bots_cycle",
+  "map_cycle",
+  "back",
+  "launch",
+}
+
+local function refresh(self)
+  local s = session.settings
+  widgets.text("title", i18n.t("training.title"))
+  for row, setting in pairs(STEPPERS) do
+    widgets.text(row .. "_label", i18n.t("training." .. row))
+    widgets.text(row .. "_value", tostring(s[setting]))
+    local spec = rules.SETTINGS[setting]
+    widgets.button(
+      row .. "_minus",
+      { text = i18n.t("training.less"), enabled = s[setting] > spec.min }
+    )
+    widgets.button(
+      row .. "_plus",
+      { text = i18n.t("training.more"), enabled = s[setting] < spec.max }
+    )
+  end
+  for row, cycle in pairs(CYCLES) do
+    widgets.text(row .. "_label", i18n.t("training." .. row))
+    widgets.button(row .. "_cycle", { text = i18n.t(cycle.prefix .. s[cycle.setting]) })
+  end
+  widgets.button("back", { text = i18n.t("training.back") })
+  widgets.button("launch", { text = i18n.t("training.launch") })
+  widgets.fit(self, FIT)
+  local targets = {}
+  for _, name in ipairs(BUTTONS) do
+    targets[name] = gui.get_node(name)
+  end
+  testmode.targets("training", targets)
+  testmode.put("settings", s)
+end
+
+local function step(setting, delta)
+  local spec = rules.SETTINGS[setting]
+  local value = session.settings[setting] + delta
+  session.settings[setting] = math.max(spec.min, math.min(spec.max, value))
+end
+
+local function cycle(setting)
+  local choices = rules.SETTINGS[setting].choices
+  for i, value in ipairs(choices) do
+    if value == session.settings[setting] then
+      session.settings[setting] = choices[i % #choices + 1]
+      return
+    end
+  end
+  session.settings[setting] = choices[1]
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  refresh(self)
+end
+
+function update(self)
+  if widgets.resized(self) then
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  elseif message_id == hash("refresh") then
+    refresh(self)
+  end
+end
+
+function on_input(self, action_id, action)
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  if pressed == nil then
+    return false
+  end
+  local row, what = pressed:match("^(%a+)_(%a+)$")
+  if STEPPERS[row] then
+    step(STEPPERS[row], what == "plus" and 1 or -1)
+  elseif CYCLES[row] then
+    cycle(CYCLES[row].setting)
+  elseif pressed == "back" then
+    msg.post("main:/app#app", "show", { screen = "home" })
+  elseif pressed == "launch" then
+    msg.post("main:/app#app", "start_training")
+  end
+  refresh(self)
+  return true
+end

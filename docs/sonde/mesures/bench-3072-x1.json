@@ -1,0 +1,138 @@
+{
+ "done": true,
+ "elapsed_ms": 5947,
+ "spikeResults": {
+  "create_tex_ms": 26.7,
+  "platform": "HTML5",
+  "gen_ms": 277.7,
+  "phases": {
+   "sub": {
+    "carve": {
+     "p50": 0.6,
+     "avg": 0.698,
+     "max": 1.1,
+     "p95": 1,
+     "n": 50
+    },
+    "frame": {
+     "p50": 17,
+     "avg": 16.66,
+     "max": 17,
+     "p95": 17,
+     "n": 50
+    },
+    "upload": {
+     "p50": 0.1,
+     "avg": 0.14,
+     "max": 0.6,
+     "p95": 0.2,
+     "n": 50
+    }
+   },
+   "baseline": {
+    "carve": {
+     "n": 0
+    },
+    "frame": {
+     "p50": 17,
+     "avg": 16.667,
+     "max": 17,
+     "p95": 17,
+     "n": 60
+    },
+    "upload": {
+     "n": 0
+    }
+   },
+   "full": {
+    "carve": {
+     "p50": 0.9,
+     "avg": 0.828,
+     "max": 1,
+     "p95": 1,
+     "n": 50
+    },
+    "frame": {
+     "p50": 17,
+     "avg": 16.66,
+     "max": 18,
+     "p95": 17,
+     "n": 50
+    },
+    "upload": {
+     "p50": 3.7,
+     "avg": 3.514,
+     "max": 9.7,
+     "p95": 5.7,
+     "n": 50
+    }
+   },
+   "rows": {
+    "carve": {
+     "p50": 0.1,
+     "avg": 0.122,
+     "max": 0.2,
+     "p95": 0.2,
+     "n": 50
+    },
+    "frame": {
+     "p50": 17,
+     "avg": 16.68,
+     "max": 17,
+     "p95": 17,
+     "n": 50
+    },
+    "upload": {
+     "p50": 0.2,
+     "avg": 0.17,
+     "max": 0.3,
+     "p95": 0.3,
+     "n": 50
+    }
+   }
+  },
+  "W": 3072,
+  "grid": {
+   "lookup_solid": 87227,
+   "lookup_ns": 316.00000000001,
+   "grid_build_ms": 313.5,
+   "w": 3072,
+   "heights_ms": 1.9999999999998,
+   "h": 1536,
+   "grid_chk_after": "1082896651",
+   "grid_chk_before": "2983530908",
+   "grid_carve_avg_ms": 0.093999999999994
+  },
+  "H": 1536,
+  "clock_gran_ms": 0.099999999999989,
+  "lua_kb": 4852.3037109375,
+  "sanity": "px(1536,948)a=255 px(1536,973)a=0",
+  "lookup": {
+   "buffer_ns": 204
+  }
+ },
+ "spikeNet": null,
+ "spikeProbe": {
+  "bit_raw_lshift": "-16",
+  "trig": "1320161057",
+  "float_xy": "366.37162720384015,0.10303205256324084",
+  "bench200k_ms": 99.999904632568,
+  "bench200k": "3181660144",
+  "xorshift": "3786880798",
+  "has_bit32": false,
+  "version": "Lua 5.1",
+  "has_bit": true,
+  "float": "1115105457",
+  "fixed": "1612344986",
+  "jit": false,
+  "trig_sum": "6231.5269888193161"
+ },
+ "stats": "client probe fixed=1612344986 float=1115105457 trig=1320161057 xorshift=3786880798 (Lua 5.1)\nmap 3072x1536 gen 278ms tex 27ms clock-gran 0.100ms  px(1536,948)a=255 px(1536,973)a=0\ntap the ground to carve (mode sub)\nframe avg 16.7ms max 17.0ms (60 fps) lua 661 KB\nbench rows 50/50",
+ "webgl": "844 | 390 | WebGL 2.0 (OpenGL ES 3.0 Chromium) | ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver) | 8192",
+ "logs": [
+  "[log.warning] <meta name=\"apple-mobile-web-app-capable\" content=\"yes\"> is deprecated. Please include <meta name=\"mobile-web-app-capable\" content=\"yes\"> http://127.0.0.1:8093/?net=0&bench=1&size=3072",
+  "[console.log] Running...",
+  "[console.log] %c    %c    Made with Defold    %c    %c    https://www.defold.com background: #fd6623; padding:5px 0; border: 5px; background: #272c31; color: #fafafa; padding:5px 0; background: #39a3e4; padding:5px 0; background: #ffffff; color: #000000; padding:5px 0;",
+  "[console.log] "
+ ]
+}

@@ -1,0 +1,180 @@
+local i18n = require("ui.i18n")
+local keymap = require("input.keymap")
+local palette = require("ui.palette")
+local pointer = require("ui.pointer")
+local profile = require("main.profile")
+local protocol = require("shared.protocol")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local text_fields = require("ui.text_fields")
+local widgets = require("ui.widgets")
+
+local BUTTONS = { "nickname", "team", "dice", "training", "multi", "keys" }
+local FIT = {
+  "title",
+  "panel",
+  "nickname_caption",
+  "nickname",
+  "team_caption",
+  "team",
+  "dice",
+  "problem",
+  "training",
+  "multi",
+  "keys",
+}
+local FIELDS = { nickname = "nickname", team = "team_name" }
+local PANEL = { landscape = vmath.vector3(560, 150, 0), portrait = vmath.vector3(360, 290, 0) }
+local PANEL_ALPHA = 0.35
+local KEY_NAMES = keymap.actions(hash)
+local ESCAPE = hash(keymap.ESCAPE)
+
+local function ready(p)
+  return protocol.valid_nickname(p.nickname) and protocol.valid_nickname(p.team_name)
+end
+
+local function place_fields(self)
+  if not text_fields.available() or not self.visible then
+    return
+  end
+  local _, scale = widgets.reference()
+  for node, key in pairs(FIELDS) do
+    text_fields.place(node, gui.get_node(node), {
+      value = session.profile[key] or "",
+      max = protocol.NICKNAME_MAX,
+      colour = palette.INK,
+      scale = scale,
+    })
+  end
+end
+
+local function refresh(self)
+  local p = session.profile
+  local fields = text_fields.available()
+  gui.set_enabled(widgets.text("title", i18n.t("app.title")), false)
+  widgets.text("nickname_caption", i18n.t("home.nickname"))
+  widgets.text("team_caption", i18n.t("home.team"))
+  widgets.button("nickname", { text = fields and "" or (p.nickname or "") })
+  widgets.button("team", { text = fields and "" or p.team_name })
+  for node in pairs(FIELDS) do
+    gui.set_color(gui.get_node(node), widgets.colour(palette.PAPER))
+  end
+  widgets.button("dice", { text = i18n.t("home.dice") })
+  widgets.button("training", { text = i18n.t("home.training"), enabled = ready(p) })
+  widgets.button("multi", { text = i18n.t("home.multi"), enabled = ready(p) })
+  local keys = widgets.button("keys", { text = i18n.t("home.keys") })
+  gui.set_enabled(keys, session.keyboard or not pointer.touch_device())
+  local panel = gui.get_node("panel")
+  local ref = widgets.reference()
+  gui.set_size(panel, ref[1] < ref[2] and PANEL.portrait or PANEL.landscape)
+  gui.set_color(panel, widgets.colour(palette.PAPER, PANEL_ALPHA))
+  local problem = widgets.text("problem", i18n.t("home.invalid"), palette.TEAMS[1])
+  gui.set_enabled(problem, self.problem == true)
+  widgets.fit(self, FIT)
+  local targets = {}
+  for _, name in ipairs(BUTTONS) do
+    targets[name] = gui.get_node(name)
+  end
+  testmode.targets("home", targets)
+  testmode.put("ui_factor", self.fit_factor)
+  testmode.put(
+    "profile",
+    { nickname = p.nickname, team_name = p.team_name, fresh = p.fresh == true }
+  )
+  place_fields(self)
+end
+
+local function change(self, key, value)
+  local p = session.profile
+  if not protocol.valid_nickname(value) then
+    self.problem = true
+    return false
+  end
+  self.problem = false
+  p[key] = value
+  profile.save(p)
+  return true
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  text_fields.setup()
+  self.problem = false
+  self.visible = false
+  refresh(self)
+end
+
+local function apply_typed(self)
+  local id, value = text_fields.poll()
+  local any, refused = id ~= nil, false
+  while id do
+    if not change(self, FIELDS[id], value) then
+      refused = true
+    end
+    id, value = text_fields.poll()
+  end
+  return any, refused
+end
+
+function update(self)
+  if not self.visible then
+    return
+  end
+  if apply_typed(self) or widgets.resized(self) then
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  elseif message_id == hash("refresh") then
+    self.visible = true
+    refresh(self)
+  elseif message_id == hash("hidden") then
+    self.visible = false
+    text_fields.hide()
+  end
+end
+
+function on_input(self, action_id, action)
+  if not self.visible then
+    return false
+  end
+  if (KEY_NAMES[action_id] or action_id == ESCAPE) and action.pressed and not session.keyboard then
+    session.keyboard = true
+    refresh(self)
+    return false
+  end
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  if pressed == nil then
+    return false
+  end
+  text_fields.blur()
+  local _, refused = apply_typed(self)
+  local p = session.profile
+  if refused then
+    refresh(self)
+    return true
+  end
+  if pressed == "dice" then
+    change(self, "team_name", profile.suggest_team())
+  elseif pressed == "keys" then
+    msg.post("main:/app#app", "show", { screen = "keys" })
+    return true
+  elseif pressed == "training" or pressed == "multi" then
+    if not ready(p) then
+      self.problem = true
+    else
+      if p.fresh then
+        profile.complete(p)
+      end
+      refresh(self)
+      msg.post("main:/app#app", "show", { screen = pressed })
+      return true
+    end
+  end
+  refresh(self)
+  return true
+end

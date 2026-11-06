@@ -1,0 +1,87 @@
+local fixed = require("shared.sim.fixed")
+
+describe("🧮 fixed-point arithmetic", function()
+  it("🧮 divides with floor semantics, negatives included", function()
+    assert.are.equal(3, fixed.div(7, 2))
+    assert.are.equal(-4, fixed.div(-7, 2))
+    assert.are.equal(-4, fixed.div(7, -2))
+    assert.are.equal(3, fixed.div(-7, -2))
+    assert.are.equal(-1, fixed.div(-1, 256))
+  end)
+
+  it("🧮 takes the modulo with the sign of the divisor", function()
+    assert.are.equal(1, fixed.mod(7, 2))
+    assert.are.equal(1, fixed.mod(-7, 2))
+    assert.are.equal(-1, fixed.mod(7, -2))
+    assert.are.equal(1023, fixed.mod(-1, 1024))
+  end)
+
+  it("🧮 stays exact at the 2^50 bound", function()
+    local big = 1125899906842623
+    assert.are.equal(big, fixed.div(big, 1))
+    assert.are.equal(0, fixed.mod(big, 1))
+    assert.are.equal(562949953421311, fixed.div(big, 2))
+    assert.are.equal(1, fixed.mod(big, 2))
+    assert.are.equal(524288, fixed.div(big - 1, 2147483646))
+    assert.are.equal(375299968947541, fixed.div(big, 3))
+    assert.are.equal(-160842843834661, fixed.div(-big, 7))
+    assert.are.equal(4, fixed.mod(-big, 7))
+  end)
+
+  it("🧮 refuses to divide by zero", function()
+    assert.has_error(function()
+      fixed.div(1, 0)
+    end)
+    assert.has_error(function()
+      fixed.mod(1, 0)
+    end)
+    assert.has_error(function()
+      fixed.round_div(1, 0)
+    end)
+  end)
+
+  it("🧮 never returns a negative zero", function()
+    local function positive_zero(v)
+      return v == 0 and 1 / v > 0
+    end
+    assert.is_true(positive_zero(fixed.div(0, -3)))
+    assert.is_true(positive_zero(fixed.mul(-1, 0)))
+    assert.is_true(positive_zero(fixed.mod(-4, 2)))
+    assert.is_true(positive_zero(fixed.round_div(-1, 4)))
+  end)
+
+  it("🧮 rounds half away from zero, symmetrically", function()
+    assert.are.equal(3, fixed.round_div(5, 2))
+    assert.are.equal(-3, fixed.round_div(-5, 2))
+    assert.are.equal(1, fixed.round_div(3, 4))
+    assert.are.equal(-1, fixed.round_div(-3, 4))
+    for a = -3000, 3000, 7 do
+      assert.are.equal(-fixed.round_div(a, 256), fixed.round_div(-a, 256))
+    end
+  end)
+
+  it("🧮 multiplies two fixed-point values", function()
+    assert.are.equal(768, fixed.mul(512, 384))
+    assert.are.equal(-1, fixed.mul(-1, 1))
+  end)
+
+  it("🧮 takes the exact integer square root", function()
+    for n = 0, 20000 do
+      local r = fixed.isqrt(n)
+      assert.is_true(r * r <= n and (r + 1) * (r + 1) > n, "isqrt(" .. n .. ") = " .. r)
+    end
+    assert.are.equal(33554431, fixed.isqrt(1125899906842623))
+    assert.are.equal(33554431, fixed.isqrt(1125899906842624 - 1))
+    assert.has_error(function()
+      fixed.isqrt(-1)
+    end)
+  end)
+
+  it("🧮 clamps, signs and takes absolute values", function()
+    assert.are.equal(2, fixed.clamp(1, 2, 5))
+    assert.are.equal(5, fixed.clamp(9, 2, 5))
+    assert.are.equal(3, fixed.clamp(3, 2, 5))
+    assert.are.same({ -1, 0, 1 }, { fixed.sign(-7), fixed.sign(0), fixed.sign(3) })
+    assert.are.same({ 7, 0, 3 }, { fixed.abs(-7), fixed.abs(0), fixed.abs(3) })
+  end)
+end)

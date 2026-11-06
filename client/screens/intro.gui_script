@@ -1,0 +1,124 @@
+local intro = require("ui.intro")
+local palette = require("ui.palette")
+local pointer = require("ui.pointer")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local NODES = { "studio", "logo" }
+local MAX_DT = 0.05
+local TILT = 3
+local SKIP = { hash("key_space"), hash("key_enter") }
+
+local function refresh(self)
+  widgets.fit(self, NODES)
+  self.base = {}
+  for _, id in ipairs(NODES) do
+    local node = gui.get_node(id)
+    self.base[id] = { pos = gui.get_position(node), scale = gui.get_scale(node) }
+  end
+end
+
+local function jitter(amount)
+  return (math.random() * 2 - 1) * amount
+end
+
+local function place(self, id, frame)
+  local node, base = gui.get_node(id), self.base[id]
+  if id == "studio" then
+    gui.set_position(node, base.pos + vmath.vector3(jitter(frame.shake), jitter(frame.shake), 0))
+    gui.set_euler(node, vmath.vector3(0, 0, jitter(TILT * frame.shake / intro.SHAKE_MAX)))
+    gui.set_scale(node, base.scale * frame.zoom)
+    gui.set_color(node, vmath.vector4(1, 1, 1, frame.studio))
+  else
+    gui.set_scale(node, base.scale * frame.logo_scale)
+    gui.set_color(node, vmath.vector4(1, 1, 1, frame.logo))
+  end
+end
+
+local function publish(self, frame)
+  local phase = "studio"
+  if frame.over then
+    phase = "over"
+  elseif frame.home then
+    phase = "home"
+  elseif self.t >= intro.STUDIO_OUT then
+    phase = "logo"
+  end
+  local shake = math.floor(frame.studio > 0 and frame.shake or 0)
+  self.peak = math.max(self.peak, shake)
+  if frame.studio == 0 and frame.logo == 0 and self.t > intro.SHAKE_UNTIL and not frame.home then
+    self.gap = true
+  end
+  local tenth = math.floor(self.t * 10)
+  if phase ~= self.phase or tenth ~= self.tenth then
+    self.phase, self.tenth = phase, tenth
+    testmode.put("intro", {
+      phase = phase,
+      t = tenth / 10,
+      shake = shake,
+      peak = self.peak,
+      gap = self.gap,
+      studio = frame.studio > 0,
+      logo = frame.logo > 0,
+    })
+  end
+end
+
+function init(self)
+  gui.set_render_order(14)
+  msg.post(".", "acquire_input_focus")
+  self.t = 0
+  self.frame = {}
+  self.peak, self.gap = 0, false
+  local studio = palette.STUDIO
+  gui.set_color(gui.get_node("cover"), vmath.vector4(studio[1], studio[2], studio[3], 1))
+  refresh(self)
+  testmode.targets("intro", { skip = gui.get_node("cover") })
+end
+
+function update(self, dt)
+  if self.over then
+    return
+  end
+  self.t = self.t + math.min(dt, MAX_DT)
+  local frame = intro.at(self.t, self.frame)
+  for _, id in ipairs(NODES) do
+    place(self, id, frame)
+  end
+  local studio = palette.STUDIO
+  gui.set_color(gui.get_node("cover"), vmath.vector4(studio[1], studio[2], studio[3], frame.cover))
+  publish(self, frame)
+  if frame.home and not self.home then
+    self.home = true
+    msg.post("main:/app#app", "show", { screen = "home" })
+  end
+  if frame.over then
+    self.over = true
+    msg.post("main:/app#app", "intro_over")
+  end
+end
+
+function on_input(self, action_id, action)
+  if self.home then
+    return false
+  end
+  for _, p in ipairs(pointer.from(action_id, action) or {}) do
+    if p.released then
+      self.t = intro.skip(self.t)
+    end
+  end
+  for _, skip in ipairs(SKIP) do
+    if action_id == skip and action.released then
+      self.t = intro.skip(self.t)
+    end
+  end
+  return true
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+    testmode.targets("intro", { skip = gui.get_node("cover") })
+  end
+end

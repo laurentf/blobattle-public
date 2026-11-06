@@ -1,0 +1,39 @@
+local i18n = require("ui.i18n")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local EVERY = 0.5
+
+local function rounded(value)
+  return value and math.floor(value + 0.5) or 0
+end
+
+function init(self)
+  self.node = gui.get_node("measures")
+  self.at = 0
+  gui.set_enabled(self.node, false)
+end
+
+function update(self, dt)
+  self.at = self.at + dt
+  if self.at < EVERY or not testmode.enabled() then
+    return
+  end
+  self.at = 0
+  local l = session.link
+  local m = l and l.measures
+  gui.set_enabled(self.node, m ~= nil)
+  if m == nil then
+    return
+  end
+  widgets.text(
+    "measures",
+    i18n.format("test.measures", {
+      rtt = rounded(m.rtt_ms),
+      avg = rounded(m.rtt_avg_ms),
+      back = m.rejoined_s and string.format("%.1f", m.rejoined_s) or "-",
+      bytes = m.snapshot_bytes or 0,
+    })
+  )
+end

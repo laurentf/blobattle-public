@@ -1,0 +1,6 @@
+tunnel: TUNNEL_ID
+credentials-file: /etc/cloudflared/blobattle.json
+ingress:
+  - path: ^/(v2/.*|ws|healthcheck)$
+    service: http://blobattle-nakama:7350
+  - service: http://blobattle-web:80

@@ -1,0 +1,524 @@
+-- Throwaway prototype (Q-04): the real sim, rendered as voxels, with jelly voxel blobs.
+local driver = require("shared.bots.driver")
+local mesher = require("main.mesher")
+local rules = require("shared.sim.rules")
+local terrain = require("shared.sim.terrain")
+local voxel = require("main.voxel")
+local world = require("shared.sim.world")
+
+local FP = 256
+local H = rules.MAP_HEIGHT
+local CHUNK = 32
+local DZ = 10
+local TICK = 1 / 30
+
+local TEAM_COLORS = {
+	vmath.vector4(0.97, 0.38, 0.42, 1),
+	vmath.vector4(0.32, 0.64, 0.98, 1),
+	vmath.vector4(0.99, 0.80, 0.27, 1),
+	vmath.vector4(0.42, 0.84, 0.46, 1),
+	vmath.vector4(0.73, 0.52, 0.96, 1),
+	vmath.vector4(1.00, 0.60, 0.26, 1),
+	vmath.vector4(0.30, 0.84, 0.84, 1),
+	vmath.vector4(0.96, 0.56, 0.80, 1),
+}
+local DEBRIS_COLORS = {
+	vmath.vector4(0.98, 0.66, 0.42, 0),
+	vmath.vector4(0.47, 0.34, 0.30, 0),
+	vmath.vector4(0.36, 0.26, 0.23, 0),
+}
+
+local function now()
+	return socket.gettime()
+end
+
+local function params()
+	local out = {}
+	if html5 then
+		local search = html5.run("window.location.search") or ""
+		for k, v in search:gmatch("[?&]([^=&]+)=([^&]*)") do
+			out[k] = v
+		end
+	end
+	return out
+end
+
+local function world_pos(x_fp, y_fp)
+	return x_fp / FP, H - y_fp / FP - 1
+end
+
+local function percentile(list, p)
+	if #list == 0 then
+		return 0
+	end
+	local sorted = {}
+	for i, v in ipairs(list) do
+		sorted[i] = v
+	end
+	table.sort(sorted)
+	return sorted[math.max(1, math.ceil(#sorted * p))]
+end
+
+local function average(list)
+	local s = 0
+	for _, v in ipairs(list) do
+		s = s + v
+	end
+	return #list > 0 and s / #list or 0
+end
+
+local function remember(list, value)
+	list[#list + 1] = value
+	if #list > 300 then
+		table.remove(list, 1)
+	end
+end
+
+-- terrain chunks
+
+local function upload_chunk(self, i)
+	local buf, n = mesher.to_buffer(self.chunks[i])
+	local path = self.chunk_paths[i]
+	if path then
+		resource.set_buffer(path, buf)
+	else
+		path = "/terrain_chunk_" .. i .. ".bufferc"
+		local res = resource.create_buffer(path, { buffer = buf })
+		local id = factory.create("#chunk_factory")
+		go.set(msg.url(nil, id, "mesh"), "vertices", res)
+		self.chunk_paths[i] = path
+	end
+	self.chunk_verts[i] = n
+end
+
+local function build_terrain(self)
+	local t = self.w.terrain
+	for i = 1, math.ceil(t.width / CHUNK) do
+		local x0 = (i - 1) * CHUNK
+		self.chunks[i] = mesher.new_chunk(x0, math.min(x0 + CHUNK, t.width))
+		mesher.build_all(self.chunks[i], t, DZ)
+		upload_chunk(self, i)
+	end
+end
+
+local function mark_crater(self, x, y, radius)
+	local first = math.max(1, math.floor((x - radius - 1) / CHUNK) + 1)
+	local last = math.min(#self.chunks, math.floor((x + radius + 1) / CHUNK) + 1)
+	for i = first, last do
+		local d = self.dirty[i]
+		local rows, cols = { y - radius - 1, y + radius + 2 }, { x - radius - 1, x + radius + 1 }
+		if d then
+			d.rows[1], d.rows[2] = math.min(d.rows[1], rows[1]), math.max(d.rows[2], rows[2])
+			d.cols[1], d.cols[2] = math.min(d.cols[1], cols[1]), math.max(d.cols[2], cols[2])
+		else
+			self.dirty[i] = { rows = rows, cols = cols }
+		end
+	end
+end
+
+-- rebuilds dirty rows and columns within the frame budget; a chunk is uploaded once complete
+local function rebuild(self, budget_ms)
+	local t0 = now()
+	local t = self.w.terrain
+	local worked = false
+	for i, d in pairs(self.dirty) do
+		local chunk = self.chunks[i]
+		while d.rows[1] <= d.rows[2] and (now() - t0) * 1000 < budget_ms do
+			mesher.build_row(chunk, t, d.rows[1], DZ)
+			d.rows[1] = d.rows[1] + 1
+			worked = true
+		end
+		while d.rows[1] > d.rows[2] and d.cols[1] <= d.cols[2] and (now() - t0) * 1000 < budget_ms do
+			mesher.build_col(chunk, t, d.cols[1], DZ)
+			d.cols[1] = d.cols[1] + 1
+			worked = true
+		end
+		if d.rows[1] > d.rows[2] and d.cols[1] > d.cols[2] then
+			upload_chunk(self, i)
+			self.dirty[i] = nil
+		end
+		if (now() - t0) * 1000 >= budget_ms then
+			break
+		end
+	end
+	if worked then
+		remember(self.rebuild_ms, (now() - t0) * 1000)
+	end
+end
+
+local function build_liquid(self)
+	local w = self.w
+	local top = H - w.liquid.level
+	local x0, x1 = -rules.OUT_MARGIN, w.terrain.width + rules.OUT_MARGIN
+	local pos, nrm = {}, {}
+	local function vert(x, y, z, surface)
+		local k = #pos
+		pos[k + 1], pos[k + 2], pos[k + 3] = x, y, z
+		nrm[k + 1], nrm[k + 2], nrm[k + 3] = surface, 0, 1 - surface
+	end
+	local step = 4
+	for x = x0, x1 - step, step do
+		local a, b = x, x + step
+		vert(a, -30, DZ + 0.4, 0)
+		vert(b, -30, DZ + 0.4, 0)
+		vert(b, top, DZ + 0.4, 1)
+		vert(a, -30, DZ + 0.4, 0)
+		vert(b, top, DZ + 0.4, 1)
+		vert(a, top, DZ + 0.4, 1)
+		vert(a, top, DZ + 0.4, 1)
+		vert(b, top, DZ + 0.4, 1)
+		vert(b, top, -DZ, 1)
+		vert(a, top, DZ + 0.4, 1)
+		vert(b, top, -DZ, 1)
+		vert(a, top, -DZ, 1)
+	end
+	local buf = buffer.create(#pos / 3, {
+		{ name = hash("position"), type = buffer.VALUE_TYPE_FLOAT32, count = 3 },
+		{ name = hash("normal"), type = buffer.VALUE_TYPE_FLOAT32, count = 3 },
+	})
+	local ps, ns = buffer.get_stream(buf, "position"), buffer.get_stream(buf, "normal")
+	for i = 1, #pos do
+		ps[i] = pos[i]
+		ns[i] = nrm[i]
+	end
+	go.set("/liquid#mesh", "vertices", resource.create_buffer("/liquid.bufferc", { buffer = buf }))
+	if w.liquid.kind == "lava" then
+		go.set("/liquid#mesh", "tint", vmath.vector4(0.98, 0.42, 0.18, 1))
+	end
+end
+
+-- blobs, projectiles, explosions
+
+local function cube(self, pos, tint, scale)
+	local id = factory.create("#ball_factory", pos)
+	local body = msg.url(nil, id, "body")
+	go.set(body, "vertices", self.cube_res)
+	go.set(body, "tint", tint)
+	go.set_scale(scale, id)
+	return id
+end
+
+local function spawn_blobs(self)
+	self.blobs = {}
+	for _, c in ipairs(self.w.cats) do
+		local id = factory.create("#blob_factory")
+		local body, eyes = msg.url(nil, id, "body"), msg.url(nil, id, "eyes")
+		go.set(body, "vertices", self.body_res)
+		go.set(eyes, "vertices", self.eyes_res)
+		go.set(body, "tint", TEAM_COLORS[c.team])
+		go.set(eyes, "tint", vmath.vector4(0.12, 0.10, 0.16, 0))
+		local x, y = world_pos(c.x, c.y)
+		self.blobs[c.id] = {
+			id = id,
+			body = body,
+			eyes = eyes,
+			px = x,
+			py = y,
+			x = x,
+			y = y,
+			s = 1,
+			vs = 0,
+			lean = 0,
+			wob = 0,
+			phase = c.id * 1.7,
+			face = 1,
+			dead = false,
+		}
+	end
+end
+
+local function explode(self, e)
+	mark_crater(self, e.x, e.y, e.radius)
+	local centre = vmath.vector3(e.x + 0.5, H - e.y - 0.5, 3)
+	local flash = cube(self, centre, vmath.vector4(1.0, 0.88, 0.5, 0), 3)
+	go.set_rotation(vmath.quat_rotation_z(0.6) * vmath.quat_rotation_x(0.5), flash)
+	go.animate(flash, "scale", go.PLAYBACK_ONCE_FORWARD, vmath.vector3(e.radius * 1.6), go.EASING_OUTQUAD, 0.24, 0, function()
+		go.delete(flash)
+	end)
+	for k = 1, 14 do
+		local a = math.random() * math.pi
+		local speed = 25 + math.random() * 45
+		self.debris[#self.debris + 1] = {
+			id = cube(self, centre, DEBRIS_COLORS[k % #DEBRIS_COLORS + 1], 0.8 + math.random() * 0.8),
+			x = centre.x,
+			y = centre.y,
+			z = (math.random() - 0.5) * DZ * 1.6,
+			vx = math.cos(a) * speed,
+			vy = math.sin(a) * speed,
+			spin = (math.random() - 0.5) * 16,
+			life = 0.9 + math.random() * 0.4,
+		}
+	end
+	self.shake = 1
+end
+
+local function on_events(self, events)
+	for _, e in ipairs(events) do
+		local b = e.cat and self.blobs[e.cat]
+		if e.type == "exploded" then
+			explode(self, e)
+		elseif b and e.type == "landed" then
+			b.vs = b.vs - 5
+		elseif b and e.type == "damaged" then
+			b.wob = math.min(1.4, b.wob + 0.5 + e.amount / 60)
+			b.vs = b.vs - 3
+		elseif b and e.type == "died" then
+			b.dead = true
+		elseif b and e.type == "fired" then
+			b.vs = b.vs + 4
+		end
+	end
+end
+
+local function step_sim(self)
+	local w = self.w
+	if w.turn.state == "ended" then
+		return
+	end
+	for _, c in ipairs(w.cats) do
+		local b = self.blobs[c.id]
+		b.px, b.py = b.x, b.y
+	end
+	local t0 = now()
+	local events = world.step(w, driver.inputs(self.d, w))
+	remember(self.tick_ms, (now() - t0) * 1000)
+	on_events(self, events)
+	for _, c in ipairs(w.cats) do
+		local b = self.blobs[c.id]
+		b.x, b.y = world_pos(c.x, c.y)
+		b.vx, b.vy = c.vx / FP, c.vy / FP
+		b.walk = c.walk
+		b.face = c.facing
+	end
+end
+
+local function update_blobs(self, dt, alpha)
+	local t = self.time
+	for _, c in ipairs(self.w.cats) do
+		local b = self.blobs[c.id]
+		go.set_position(vmath.vector3(b.px + (b.x - b.px) * alpha, b.py + (b.y - b.py) * alpha, 0), b.id)
+		if b.dead then
+			local flat = vmath.vector4(1.5, 0.2, 0, 0)
+			go.set(b.body, "squash", flat)
+			go.set(b.eyes, "squash", flat)
+			go.set(b.body, "tint", vmath.vector4(0.55, 0.55, 0.6, 1))
+		else
+			local stretch = math.max(-0.25, math.min(0.35, -(b.vy or 0) * 0.09))
+			local walking = (b.walk or 0) ~= 0
+			local target = 1 + stretch + math.sin(t * 2.6 + b.phase) * 0.025
+			if walking then
+				target = target + math.sin(t * 22) * 0.06
+			end
+			local acc = -170 * (b.s - target) - 9 * b.vs
+			b.vs = b.vs + acc * dt
+			b.s = b.s + b.vs * dt
+			local sy = math.max(0.45, b.s)
+			local lean_target = (b.vx or 0) * -0.08 + (walking and b.walk * -0.12 or 0)
+			b.lean = b.lean + (lean_target - b.lean) * math.min(1, dt * 10)
+			b.wob = b.wob * math.max(0, 1 - dt * 2.5)
+			local squash = vmath.vector4(1 / math.sqrt(sy), sy, -b.lean, 0)
+			local wobble = vmath.vector4(b.wob, t * 18 + b.phase, 0, 0)
+			go.set(b.body, "squash", squash)
+			go.set(b.eyes, "squash", squash)
+			go.set(b.body, "wobble", wobble)
+			go.set(b.eyes, "wobble", wobble)
+			go.set_rotation(vmath.quat_rotation_y((b.face or 1) * 0.5), b.id)
+		end
+	end
+end
+
+local function update_projectiles(self, alpha)
+	local seen = {}
+	for _, p in ipairs(self.w.projectiles) do
+		if p.alive then
+			seen[p.id] = true
+			local ball = self.balls[p.id]
+			local x, y = world_pos(p.x, p.y)
+			if not ball then
+				local tint = p.weapon == "grenade" and vmath.vector4(0.30, 0.55, 0.30, 1) or vmath.vector4(0.20, 0.20, 0.26, 1)
+				ball = { id = cube(self, vmath.vector3(x, y + 1, 0), tint, 2), px = x, py = y, x = x, y = y }
+				self.balls[p.id] = ball
+			end
+			if ball.tick ~= self.w.tick then
+				ball.px, ball.py = ball.x, ball.y
+				ball.x, ball.y, ball.tick = x, y, self.w.tick
+			end
+			local bx, by = ball.px + (ball.x - ball.px) * alpha, ball.py + (ball.y - ball.py) * alpha + 1
+			go.set_position(vmath.vector3(bx, by, 0), ball.id)
+			go.set_rotation(vmath.quat_rotation_z(self.time * 9) * vmath.quat_rotation_x(self.time * 5), ball.id)
+		end
+	end
+	for pid, ball in pairs(self.balls) do
+		if not seen[pid] then
+			go.delete(ball.id)
+			self.balls[pid] = nil
+		end
+	end
+end
+
+local function update_debris(self, dt)
+	local kept = {}
+	for _, d in ipairs(self.debris) do
+		d.life = d.life - dt
+		if d.life <= 0 then
+			go.delete(d.id)
+		else
+			d.vy = d.vy - 120 * dt
+			d.x, d.y = d.x + d.vx * dt, d.y + d.vy * dt
+			go.set_position(vmath.vector3(d.x, d.y, d.z), d.id)
+			go.set_rotation(vmath.quat_rotation_z(d.spin * d.life) * vmath.quat_rotation_x(d.spin * 0.7 * d.life), d.id)
+			kept[#kept + 1] = d
+		end
+	end
+	self.debris = kept
+end
+
+local function update_camera(self, dt)
+	local w = self.w
+	local tx, ty
+	local focus = nil
+	for _, ball in pairs(self.balls) do
+		focus = ball
+	end
+	if focus then
+		tx, ty = focus.x, focus.y
+	else
+		local c = w.cats[w.turn.cat]
+		if c then
+			tx, ty = world_pos(c.x, c.y)
+		else
+			tx, ty = w.terrain.width / 2, H / 2
+		end
+	end
+	local k = math.min(1, dt * 3)
+	self.cam.x = self.cam.x + (tx - self.cam.x) * k
+	self.cam.y = self.cam.y + (ty + 14 - self.cam.y) * k
+	local shake = 0
+	if self.shake > 0 then
+		shake = self.shake * math.sin(self.time * 70) * 1.2
+		self.shake = math.max(0, self.shake - dt * 4)
+	end
+	go.set_position(vmath.vector3(self.cam.x + shake, self.cam.y, self.zoom), "/camera")
+	go.set_rotation(vmath.quat_rotation_x(-0.13), "/camera")
+end
+
+-- measurement
+
+local function bench(self)
+	local t = self.w.terrain
+	local times = {}
+	math.randomseed(7)
+	for _ = 1, 60 do
+		local x = math.random(40, t.width - 40)
+		local y = 0
+		while y < H - 1 and not terrain.solid(t, x, y) do
+			y = y + 1
+		end
+		terrain.carve(t, x, y + 4, 12)
+		mark_crater(self, x, y + 4, 12)
+		local t0 = now()
+		rebuild(self, 1e9)
+		times[#times + 1] = (now() - t0) * 1000
+	end
+	self.rebuild_ms = {}
+	self.bench = { avg = average(times), p95 = percentile(times, 0.95), max = percentile(times, 1) }
+end
+
+local function publish(self)
+	local verts = 0
+	for _, n in ipairs(self.chunk_verts) do
+		verts = verts + n
+	end
+	local b = self.bench or {}
+	local fps = 1000 / math.max(average(self.frame_ms), 0.001)
+	self.hud = string.format(
+		"fps %.0f | frame p95 %.1f ms | tick %.2f ms | rebuild slice %.2f ms (max %.2f) | map %.0f ms | %d verts",
+		fps,
+		percentile(self.frame_ms, 0.95),
+		average(self.tick_ms),
+		average(self.rebuild_ms),
+		percentile(self.rebuild_ms, 1),
+		self.full_build_ms,
+		verts
+	)
+	if html5 then
+		html5.run(string.format(
+			"window.proto = {fps:%.1f, frame_p95:%.2f, tick_avg:%.3f, tick_p95:%.3f, rebuild_avg:%.3f, rebuild_max:%.3f, slices:%d, full_build:%.1f, verts:%d, bench_avg:%.3f, bench_p95:%.3f, bench_max:%.3f, sim_tick:%d, time:%.1f}",
+			fps,
+			percentile(self.frame_ms, 0.95),
+			average(self.tick_ms),
+			percentile(self.tick_ms, 0.95),
+			average(self.rebuild_ms),
+			percentile(self.rebuild_ms, 1),
+			#self.rebuild_ms,
+			self.full_build_ms,
+			verts,
+			b.avg or -1,
+			b.p95 or -1,
+			b.max or -1,
+			self.w.tick,
+			self.time
+		))
+	end
+end
+
+function init(self)
+	self.params = params()
+	local p = self.params
+	self.zoom = tonumber(p.zoom) or 165
+	self.budget = tonumber(p.budget) or 2
+	self.time, self.acc, self.shake, self.published_at = 0, 0, 0, 0
+	self.tick_ms, self.frame_ms, self.rebuild_ms = {}, {}, {}
+	self.dirty, self.balls, self.debris = {}, {}, {}
+	self.chunks, self.chunk_paths, self.chunk_verts = {}, {}, {}
+	self.body_res = resource.create_buffer("/blob_body.bufferc", { buffer = voxel.blob() })
+	self.eyes_res = resource.create_buffer("/blob_eyes.bufferc", { buffer = voxel.eyes() })
+	self.cube_res = resource.create_buffer("/cube.bufferc", { buffer = voxel.cube() })
+	local seed = tonumber(p.seed) or 4242
+	self.w = assert(world.new(seed, {
+		teams = tonumber(p.teams) or 4,
+		cats_per_team = tonumber(p.cats) or 4,
+		bot_level = "hard",
+		liquid = p.liquid or "random",
+	}))
+	local all = {}
+	for i = 1, #self.w.teams do
+		all[i] = i
+	end
+	self.d = driver.new({ seed = seed, teams = all, level = "hard" })
+	local t0 = now()
+	build_terrain(self)
+	self.full_build_ms = (now() - t0) * 1000
+	build_liquid(self)
+	spawn_blobs(self)
+	if p.bench == "1" then
+		bench(self)
+	end
+	local c = self.w.cats[1]
+	local x, y = world_pos(c.x, c.y)
+	self.cam = { x = x, y = y + 14 }
+end
+
+function update(self, dt)
+	self.time = self.time + dt
+	remember(self.frame_ms, dt * 1000)
+	self.acc = math.min(self.acc + dt, TICK * 4)
+	while self.acc >= TICK do
+		self.acc = self.acc - TICK
+		step_sim(self)
+	end
+	rebuild(self, self.budget)
+	local alpha = self.acc / TICK
+	update_blobs(self, dt, alpha)
+	update_projectiles(self, alpha)
+	update_debris(self, dt)
+	update_camera(self, dt)
+	go.set("/liquid#mesh", "wave", vmath.vector4(self.time, 0, 0, 0))
+	if self.time - self.published_at > 1 then
+		self.published_at = self.time
+		publish(self)
+	end
+	if self.params.hud ~= "0" and self.hud then
+		msg.post("@render:", "draw_debug_text", { text = self.hud, position = vmath.vector3(8, 20, 0), color = vmath.vector4(0.1, 0.1, 0.15, 1) })
+	end
+end

@@ -1,0 +1,126 @@
+local i18n = require("ui.i18n")
+local link = require("net.link")
+local palette = require("ui.palette")
+local session = require("main.session")
+local testmode = require("ui.testmode")
+local widgets = require("ui.widgets")
+
+local ROW_STEP = { landscape = 24, portrait = 40 }
+local BUTTONS = { "rematch", "quit" }
+local FIT = { "title", "winner", "damage_head", "kills_head", "row", "quit", "rematch" }
+
+local function clear(self)
+  for _, nodes in ipairs(self.rows or {}) do
+    gui.delete_node(nodes[hash("row")])
+  end
+  self.rows = {}
+end
+
+local function refresh(self)
+  clear(self)
+  local result = session.result
+  widgets.text("title", i18n.t("end.title"))
+  widgets.text("damage_head", i18n.t("end.damage"))
+  widgets.text("kills_head", i18n.t("end.kills"))
+  local l = session.link
+  local host = not session.online or (l ~= nil and link.hosting(l))
+  widgets.button("rematch", { text = i18n.t("end.rematch"), enabled = host })
+  widgets.button("quit", { text = i18n.t("end.quit") })
+  gui.set_enabled(gui.get_node("row"), true)
+  local factor = widgets.fit(self, FIT)
+  gui.set_enabled(gui.get_node("row"), false)
+  testmode.targets("end", { rematch = gui.get_node("rematch"), quit = gui.get_node("quit") })
+  if result == nil then
+    return
+  end
+  local winner = result.teams[result.winner]
+  if winner then
+    widgets.text(
+      "winner",
+      i18n.format("end.winner", { team = winner }),
+      palette.TEAMS[result.winner]
+    )
+  else
+    widgets.text("winner", i18n.t("end.draw"))
+  end
+  local template = gui.get_node("row")
+  local width, height = window.get_size()
+  local step = (height > width and ROW_STEP.portrait or ROW_STEP.landscape) * factor
+  local origin = gui.get_position(template)
+  for i, line in ipairs(result.stats) do
+    local nodes = gui.clone_tree(template)
+    local row = nodes[hash("row")]
+    gui.set_enabled(row, true)
+    gui.set_position(row, origin - vmath.vector3(0, (i - 1) * step, 0))
+    gui.set_color(row, widgets.colour(palette.TEAMS[line.team]))
+    local letter = nodes[hash("row_letter")]
+    gui.set_text(letter, palette.LETTERS[line.team])
+    gui.set_color(letter, widgets.colour(palette.INK))
+    gui.set_outline(letter, widgets.colour(palette.PAPER))
+    for key, value in pairs({
+      row_name = result.teams[line.team],
+      row_damage = tostring(line.damage),
+      row_kills = tostring(line.kills),
+    }) do
+      local node = nodes[hash(key)]
+      gui.set_text(node, value)
+      gui.set_color(node, widgets.colour(palette.PAPER))
+      gui.set_outline(node, widgets.colour(palette.INK))
+    end
+    self.rows[i] = nodes
+  end
+  if testmode.enabled() then
+    local shown = { winner = gui.get_text(gui.get_node("winner")), rows = {} }
+    for i, nodes in ipairs(self.rows) do
+      shown.rows[i] = {
+        enabled = gui.is_enabled(nodes[hash("row")], true),
+        name = gui.get_text(nodes[hash("row_name")]),
+        damage = gui.get_text(nodes[hash("row_damage")]),
+        kills = gui.get_text(nodes[hash("row_kills")]),
+      }
+    end
+    testmode.put("result", {
+      winner = result.winner,
+      stats = result.stats,
+      teams = result.teams,
+      shown = shown,
+      rematch = host,
+    })
+  end
+end
+
+function init(self)
+  msg.post(".", "acquire_input_focus")
+  gui.set_enabled(gui.get_node("row"), false)
+  refresh(self)
+end
+
+function update(self)
+  local l = session.link
+  local hosting = session.online and l ~= nil and link.hosting(l)
+  if widgets.resized(self) or hosting ~= self.hosting then
+    self.hosting = hosting
+    refresh(self)
+  end
+end
+
+function on_message(self, message_id)
+  if message_id == hash("layout_changed") then
+    self.fit_base = nil
+    refresh(self)
+  elseif message_id == hash("refresh") then
+    refresh(self)
+  end
+end
+
+function on_input(_, action_id, action)
+  local pressed = widgets.released(action_id, action, BUTTONS)
+  if pressed == "rematch" and not session.online then
+    msg.post("main:/app#app", "start_training")
+  elseif pressed == "rematch" then
+    msg.post("main:/app#app", "rematch")
+  elseif pressed == "quit" then
+    msg.post("main:/app#app", "show", { screen = "home" })
+  end
+  return pressed ~= nil
+end
